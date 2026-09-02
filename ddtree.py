@@ -22,6 +22,7 @@ _CPP_COMPACT_ENABLED = False
 @lru_cache(maxsize=1)
 def load_cpp_compact_module():
     try:
+        import pybind11
         from torch.utils.cpp_extension import load_inline
     except Exception as exc:
         logger.warning(f"torch.utils.cpp_extension is unavailable; falling back to Python cache compaction. {exc}")
@@ -63,6 +64,7 @@ torch::Tensor compact_tail_inplace(torch::Tensor cache_tensor, int64_t past_leng
             cpp_sources=[cpp_source],
             functions=["compact_tail_inplace"],
             extra_cflags=["-O3"],
+            extra_include_paths=[pybind11.get_include()],
             verbose=False,
         )
         logger.info("Loaded inline C++ tail cache compaction extension for DDTree.")

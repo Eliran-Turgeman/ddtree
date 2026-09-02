@@ -31,6 +31,23 @@ bash run_benchmark.sh
 
 This produces benchmark outputs in `runs/` and logs in `logs/`.
 
+To run a limited GSM8K benchmark on one Lambda Cloud GPU:
+
+```bash
+bash run_benchmark.sh \
+  --gpus 0 \
+  --task gsm8k:32 \
+  --model-draft-pair 'Qwen/Qwen3-4B|z-lab/Qwen3-4B-DFlash-b16' \
+  --temperature 0.0 \
+  --mode sdpa
+```
+
+This runs the baseline, DFlash, and DDTree methods for 32 examples using one
+worker. Use `bash run_benchmark.sh --help` to see all sweep parameters. The
+model weights, dataset, and FlashAttention dependency are downloaded on the
+first run, so the Lambda instance needs Hugging Face access and enough local
+storage for both models.
+
 ## Reproduce Paper Artifacts
 
 Generate the plots:

@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 
-set -u
+set -euo pipefail
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-}"
 MASTER_PORT="${MASTER_PORT:-29600}"
 LOG_DIR="${LOG_DIR:-logs}"
 RUN_DIR="${RUN_DIR:-runs}"
-
-mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 TASKS=(
   "gsm8k:128"
@@ -35,8 +32,127 @@ TEMPERATURES=(
   "1.0"
 )
 
+MODES=(
+  "sdpa"
+  "flash_attn"
+)
+
+MAX_NEW_TOKENS=2048
+
+usage() {
+  cat <<'EOF'
+Usage: bash run_benchmark.sh [options]
+
+With no options, runs the complete benchmark sweep. Repeat --task,
+--model-draft-pair, --temperature, or --mode to build a custom sweep.
+
+Options:
+  --task DATASET:MAX_SAMPLES       Dataset and sample limit (repeatable)
+  --model-draft-pair MODEL|DRAFT   Target and draft model pair (repeatable)
+  --temperature VALUE              Sampling temperature (repeatable)
+  --mode MODE                      sdpa or flash_attn (repeatable)
+  --gpus IDS                       CUDA device IDs, for example 0 or 0,1
+  --nproc-per-node COUNT           Worker count (defaults to number of GPUs)
+  --max-new-tokens COUNT           Generation limit per sample (default: 2048)
+  --master-port PORT               torchrun master port (default: 29600)
+  --log-dir PATH                   Log output directory (default: logs)
+  --run-dir PATH                   Benchmark output directory (default: runs)
+  -h, --help                       Show this help
+EOF
+}
+
+custom_tasks=false
+custom_pairs=false
+custom_temperatures=false
+custom_modes=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task)
+      if [[ "${custom_tasks}" == false ]]; then
+        TASKS=()
+        custom_tasks=true
+      fi
+      TASKS+=("$2")
+      shift 2
+      ;;
+    --model-draft-pair)
+      if [[ "${custom_pairs}" == false ]]; then
+        MODEL_DRAFT_PAIRS=()
+        custom_pairs=true
+      fi
+      MODEL_DRAFT_PAIRS+=("$2")
+      shift 2
+      ;;
+    --temperature)
+      if [[ "${custom_temperatures}" == false ]]; then
+        TEMPERATURES=()
+        custom_temperatures=true
+      fi
+      TEMPERATURES+=("$2")
+      shift 2
+      ;;
+    --mode)
+      if [[ "${custom_modes}" == false ]]; then
+        MODES=()
+        custom_modes=true
+      fi
+      MODES+=("$2")
+      shift 2
+      ;;
+    --gpus)
+      CUDA_DEVICES="$2"
+      shift 2
+      ;;
+    --nproc-per-node)
+      NPROC_PER_NODE="$2"
+      shift 2
+      ;;
+    --max-new-tokens)
+      MAX_NEW_TOKENS="$2"
+      shift 2
+      ;;
+    --master-port)
+      MASTER_PORT="$2"
+      shift 2
+      ;;
+    --log-dir)
+      LOG_DIR="$2"
+      shift 2
+      ;;
+    --run-dir)
+      RUN_DIR="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
+if [[ -z "${NPROC_PER_NODE}" ]]; then
+  IFS=',' read -r -a visible_devices <<< "${CUDA_VISIBLE_DEVICES}"
+  NPROC_PER_NODE="${#visible_devices[@]}"
+fi
+
+for mode in "${MODES[@]}"; do
+  if [[ "${mode}" != "sdpa" && "${mode}" != "flash_attn" ]]; then
+    echo "Invalid mode '${mode}': expected sdpa or flash_attn" >&2
+    exit 2
+  fi
+done
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
 COMMON_BENCHMARK_ARGS=(
-  --max-new-tokens 2048
+  --max-new-tokens "${MAX_NEW_TOKENS}"
 )
 
 slugify() {
@@ -92,26 +208,23 @@ for task in "${TASKS[@]}"; do
       temperature_slug="$(slugify "${temperature}")"
       run_name="${dataset_name}__${model_slug}__${draft_slug}__temp${temperature_slug}"
 
-      run_benchmark \
-        "${dataset_name}" \
-        "${max_samples}" \
-        "${model_name}" \
-        "${draft_name}" \
-        "sdpa" \
-        "${RUN_DIR}/${run_name}__sdpa.pt" \
-        "${LOG_DIR}/${run_name}__sdpa.log" \
-        --temperature "${temperature}"
+      for mode in "${MODES[@]}"; do
+        mode_args=()
+        if [[ "${mode}" == "flash_attn" ]]; then
+          mode_args+=(--flash-attn)
+        fi
 
-      run_benchmark \
-        "${dataset_name}" \
-        "${max_samples}" \
-        "${model_name}" \
-        "${draft_name}" \
-        "flash_attn" \
-        "${RUN_DIR}/${run_name}__flash_attn.pt" \
-        "${LOG_DIR}/${run_name}__flash_attn.log" \
-        --temperature "${temperature}" \
-        --flash-attn
+        run_benchmark \
+          "${dataset_name}" \
+          "${max_samples}" \
+          "${model_name}" \
+          "${draft_name}" \
+          "${mode}" \
+          "${RUN_DIR}/${run_name}__${mode}.pt" \
+          "${LOG_DIR}/${run_name}__${mode}.log" \
+          --temperature "${temperature}" \
+          "${mode_args[@]}"
+      done
     done
   done
 done

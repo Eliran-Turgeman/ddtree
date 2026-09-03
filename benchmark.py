@@ -1,11 +1,15 @@
 import argparse
+import hashlib
+import platform
 import random
+import subprocess
 from itertools import chain
 from pathlib import Path
 
 from loguru import logger
 import numpy as np
 import torch
+import transformers
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -17,7 +21,33 @@ from model import (
 )
 from dflash import dflash_generate
 from dflash2 import dflash2_generate
+from dflash2_tree import (
+    DFLASH2_TREE_METHODS,
+    dflash2_tree_generate,
+)
 from ddtree import ddtree_generate, maybe_enable_cpp_compact
+
+
+def repository_metadata() -> dict[str, object]:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        commit = None
+        dirty = None
+    return {"commit": commit, "dirty": dirty}
 
 
 def main() -> None:
@@ -61,8 +91,7 @@ def main() -> None:
     torch.cuda.set_device(dist.local_rank())
     device = torch.device(f"cuda:{dist.local_rank()}")
     maybe_enable_cpp_compact(
-        args.draft_type == "dflash"
-        and not args.flash_attn
+        not args.flash_attn
         and not args.disable_cpp_compact_cache
     )
 
@@ -118,13 +147,26 @@ def main() -> None:
         if args.block_size is not None
         else draft_model.block_size
     )
+    if (
+        args.draft_type == "dflash2"
+        and args.tree_budget == "16,32,64,128,256,512,1024"
+    ):
+        args.tree_budget = "7,8,16,32,64"
     tree_budgets = [int(tree_budget) for tree_budget in args.tree_budget.split(",")]
     methods_to_run = [args.draft_type]
     method_key_to_tree_budget = {}
+    method_key_to_tree_method = {}
     if args.draft_type == "dflash" and not args.flash_attn:
         ddtree_method_keys = [f"ddtree_tb{tree_budget}" for tree_budget in tree_budgets]
         methods_to_run.extend(ddtree_method_keys)
         method_key_to_tree_budget.update({f"ddtree_tb{tree_budget}": tree_budget for tree_budget in tree_budgets})
+    elif args.draft_type == "dflash2":
+        for tree_method in DFLASH2_TREE_METHODS:
+            for tree_budget in tree_budgets:
+                method_key = f"{tree_method}_tb{tree_budget}"
+                methods_to_run.append(method_key)
+                method_key_to_tree_budget[method_key] = tree_budget
+                method_key_to_tree_method[method_key] = tree_method
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
     dataset = load_and_process_dataset(args.dataset)
@@ -175,7 +217,7 @@ def main() -> None:
                 stop_token_ids=[tokenizer.eos_token_id],
                 temperature=args.temperature,
             )
-        else:
+        elif method_key == "dflash2":
             _ = dflash2_generate(
                 model=draft_model,
                 target=target,
@@ -183,14 +225,25 @@ def main() -> None:
                 max_new_tokens=warmup_max_new_tokens,
                 stop_token_ids=[tokenizer.eos_token_id],
             )
+        else:
+            _ = dflash2_tree_generate(
+                model=draft_model,
+                target=target,
+                input_ids=warmup_input_ids,
+                max_new_tokens=warmup_max_new_tokens,
+                stop_token_ids=[tokenizer.eos_token_id],
+                tree_budget=method_key_to_tree_budget[method_key],
+                tree_method=method_key_to_tree_method[method_key],
+            )
 
     responses = []
     dflash2_token_matches = []
+    tree_token_matches = {}
     indices = range(dist.rank(), len(dataset), dist.size())
     for idx in tqdm(indices, disable=not dist.is_main()):
         instance = dataset[idx]
         messages = []
-        for user_content in instance["turns"]:
+        for turn_index, user_content in enumerate(instance["turns"]):
             messages.append({"role": "user", "content": user_content})
             input_text = tokenizer.apply_chat_template(
                 messages,
@@ -199,6 +252,13 @@ def main() -> None:
                 enable_thinking=False,
             )
             input_ids = tokenizer.encode(input_text, return_tensors="pt").to(target.device)
+            prompt_hash = hashlib.sha256(
+                input_text.encode("utf-8")
+            ).hexdigest()
+            prompt_id = (
+                f"{args.dataset}:selected:{idx}:turn-{turn_index}:"
+                f"{prompt_hash[:12]}"
+            )
 
             response = {}
             response["baseline"] = dflash_generate(
@@ -235,18 +295,30 @@ def main() -> None:
                         stop_token_ids=[tokenizer.eos_token_id],
                         temperature=args.temperature,
                     )
-                else:
+                elif method_key == "dflash2":
                     response[method_key] = dflash2_generate(
                         model=draft_model,
                         target=target,
                         input_ids=input_ids,
                         max_new_tokens=args.max_new_tokens,
                         stop_token_ids=[tokenizer.eos_token_id],
+                        prompt_id=prompt_id,
                     )
                     matches_baseline = torch.equal(
                         response["baseline"].output_ids,
                         response[method_key].output_ids,
                     )
+                    tree_token_matches.setdefault(method_key, []).append(
+                        response[method_key].matches_baseline
+                    )
+                    if not response[method_key].matches_baseline:
+                        logger.warning(
+                            f"{method_key} output differs from the "
+                            "sequential baseline for dataset index "
+                            f"{idx}. Inspect early or large divergences; "
+                            "occasional BF16 tree-shape argmax differences "
+                            "are possible."
+                        )
                     response[method_key].matches_baseline = matches_baseline
                     dflash2_token_matches.append(matches_baseline)
                     if not matches_baseline:
@@ -256,6 +328,21 @@ def main() -> None:
                             "argmax ties because block verification uses different "
                             "matrix shapes."
                         )
+                else:
+                    response[method_key] = dflash2_tree_generate(
+                        model=draft_model,
+                        target=target,
+                        input_ids=input_ids,
+                        max_new_tokens=args.max_new_tokens,
+                        stop_token_ids=[tokenizer.eos_token_id],
+                        tree_budget=method_key_to_tree_budget[method_key],
+                        tree_method=method_key_to_tree_method[method_key],
+                        prompt_id=prompt_id,
+                    )
+                    response[method_key].matches_baseline = torch.equal(
+                        response["baseline"].output_ids,
+                        response[method_key].output_ids,
+                    )
 
             spec_response = response[methods_to_run[-1]]
             generated_ids = spec_response.output_ids[0, spec_response.num_input_tokens :]
@@ -276,10 +363,32 @@ def main() -> None:
         "draft_attn_implementation": draft_attn_implementation,
         "target_attn_implementation": target_attn_implementation,
         "args": vars(args),
+        "runtime": {
+            "python": platform.python_version(),
+            "pytorch": torch.__version__,
+            "transformers": transformers.__version__,
+            "cuda": torch.version.cuda,
+            "gpu": torch.cuda.get_device_name(device),
+            "decode_timing_excludes_first_draft_prefill": True,
+        },
+        "repository": repository_metadata(),
+        "target_revision": getattr(target.config, "_commit_hash", None),
+        "draft_revision": getattr(
+            draft_model.config,
+            "_commit_hash",
+            None,
+        ),
     }
     if args.draft_type == "dflash2":
         run_data["exact_token_match_count"] = sum(dflash2_token_matches)
         run_data["exact_token_match_total"] = len(dflash2_token_matches)
+        run_data["tree_exact_token_matches"] = {
+            method: {
+                "count": sum(matches),
+                "total": len(matches),
+            }
+            for method, matches in tree_token_matches.items()
+        }
     
     if args.save_path is not None:
         save_path = Path(args.save_path)

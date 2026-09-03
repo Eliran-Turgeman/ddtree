@@ -40,6 +40,7 @@ MODES=(
 
 MAX_NEW_TOKENS=2048
 DRAFT_TYPE="dflash"
+TREE_BUDGETS=""
 
 usage() {
   cat <<'EOF'
@@ -57,6 +58,7 @@ Options:
   --gpus IDS                       CUDA device IDs, for example 0 or 0,1
   --nproc-per-node COUNT           Worker count (defaults to number of GPUs)
   --max-new-tokens COUNT           Generation limit per sample (default: 2048)
+  --tree-budget LIST               Comma-separated tree budgets
   --master-port PORT               torchrun master port (default: 29600)
   --python PATH                    Python interpreter (default: python)
   --log-dir PATH                   Log output directory (default: logs)
@@ -118,6 +120,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --max-new-tokens)
       MAX_NEW_TOKENS="$2"
+      shift 2
+      ;;
+    --tree-budget)
+      TREE_BUDGETS="$2"
       shift 2
       ;;
     --master-port)
@@ -183,6 +189,13 @@ if [[ "${DRAFT_TYPE}" == "dflash2" ]]; then
     fi
   done
 fi
+if [[ -z "${TREE_BUDGETS}" ]]; then
+  if [[ "${DRAFT_TYPE}" == "dflash2" ]]; then
+    TREE_BUDGETS="7,8,16,32,64"
+  else
+    TREE_BUDGETS="16,32,64,128,256,512,1024"
+  fi
+fi
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
@@ -194,6 +207,7 @@ fi
 
 COMMON_BENCHMARK_ARGS=(
   --max-new-tokens "${MAX_NEW_TOKENS}"
+  --tree-budget "${TREE_BUDGETS}"
 )
 
 slugify() {

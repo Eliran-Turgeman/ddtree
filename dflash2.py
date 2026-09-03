@@ -23,6 +23,7 @@ def dflash2_generate(
     max_new_tokens: int,
     stop_token_ids: list[int] | None,
     collect_traces: bool = False,
+    prompt_id: str | None = None,
 ) -> SimpleNamespace:
     num_input_tokens = input_ids.shape[1]
     max_length = num_input_tokens + max_new_tokens
@@ -73,9 +74,11 @@ def dflash2_generate(
     decode_start = cuda_time()
     acceptance_lengths = []
     accepted_draft_tokens = []
+    committed_tokens_per_round = []
+    verifier_bonus_committed_per_round = []
     round_timestamps = []
+    round_metrics = []
     trace_rounds = [] if collect_traces else None
-    round_clock_start = cuda_time()
     draft_prefill = True
     start = num_input_tokens
     stopped = (
@@ -84,6 +87,7 @@ def dflash2_generate(
     )
 
     while start + 1 < max_length and not stopped:
+        round_start = cuda_time()
         verify_size = min(block_size, max_length - start)
         block_output_ids = output_ids[:, start : start + verify_size].clone()
         block_position_ids = position_ids[:, start : start + verify_size]
@@ -116,7 +120,6 @@ def dflash2_generate(
         if draft_prefill:
             draft_prefill = False
             decode_start = cuda_time()
-            round_clock_start = decode_start
         else:
             stage_times["draft"] += draft_elapsed
 
@@ -128,7 +131,8 @@ def dflash2_generate(
             use_cache=True,
             output_hidden_states=True,
         )
-        stage_times["verify"] += cuda_time() - verify_start
+        verify_elapsed = cuda_time() - verify_start
+        stage_times["verify"] += verify_elapsed
 
         commit_start = cuda_time()
         posterior = output.logits.argmax(dim=-1)
@@ -248,12 +252,48 @@ def dflash2_generate(
         accepted_draft_tokens.append(
             min(acceptance_length, produced)
         )
+        committed_tokens_per_round.append(produced)
+        verifier_bonus_committed_per_round.append(
+            produced > acceptance_length
+        )
         target_hidden = extract_context_feature(
             output.hidden_states,
             model.target_layer_ids,
         )[:, :produced, :]
-        stage_times["commit"] += cuda_time() - commit_start
-        round_timestamps.append(cuda_time() - round_clock_start)
+        commit_elapsed = cuda_time() - commit_start
+        stage_times["commit"] += commit_elapsed
+        total_round_elapsed = cuda_time() - round_start
+        round_timestamps.append(cuda_time() - decode_start)
+        round_metrics.append(
+            {
+                "method": "dflash2_greedy",
+                "prompt_id": prompt_id,
+                "round_id": len(round_metrics),
+                "tree_budget": 7,
+                "tree_node_count": proposal.token_ids.shape[1],
+                "tree_max_depth": proposal.token_ids.shape[1],
+                "nodes_per_depth": [
+                    1
+                    for _ in range(proposal.token_ids.shape[1])
+                ],
+                "matched_draft_tokens": min(
+                    acceptance_length,
+                    produced,
+                ),
+                "committed_tokens_this_round": produced,
+                "verifier_bonus_committed": (
+                    produced > acceptance_length
+                ),
+                "draft_latency_ms": draft_elapsed * 1000,
+                "tree_build_latency_ms": 0.0,
+                "tree_compile_latency_ms": 0.0,
+                "target_verify_latency_ms": verify_elapsed * 1000,
+                "commit_latency_ms": commit_elapsed * 1000,
+                "total_round_latency_ms": (
+                    total_round_elapsed * 1000
+                ),
+            }
+        )
 
     output_ids = output_ids[:, : min(start + 1, max_length)]
     if trace_rounds is not None:
@@ -278,8 +318,14 @@ def dflash2_generate(
         time_per_output_token=total_decode_time / max(num_output_tokens, 1),
         acceptance_lengths=acceptance_lengths,
         accepted_draft_tokens_per_round=accepted_draft_tokens,
+        matched_draft_tokens_per_round=accepted_draft_tokens,
+        committed_tokens_per_round=committed_tokens_per_round,
+        verifier_bonus_committed_per_round=(
+            verifier_bonus_committed_per_round
+        ),
         decode_rounds=len(acceptance_lengths),
         stage_times=stage_times,
         round_timestamps=round_timestamps,
+        round_metrics=round_metrics,
         trace_rounds=trace_rounds,
     )

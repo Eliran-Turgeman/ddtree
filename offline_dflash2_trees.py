@@ -45,8 +45,10 @@ class UnaryScorer:
         log_probabilities: torch.Tensor,
     ) -> None:
         self.name = name
-        self.log_probabilities = log_probabilities.float().cpu()
-        self.depth, self.candidate_count = self.log_probabilities.shape
+        probabilities = log_probabilities.float().cpu()
+        self.depth, self.candidate_count = probabilities.shape
+        self._maximum_extension = float(probabilities.max())
+        self.log_probabilities = probabilities.tolist()
 
     def extension_log_score(
         self,
@@ -55,12 +57,10 @@ class UnaryScorer:
         candidate_index: int,
     ) -> float:
         del predecessor_candidate_index
-        return float(
-            self.log_probabilities[depth_index, candidate_index]
-        )
+        return self.log_probabilities[depth_index][candidate_index]
 
     def maximum_extension_log_score(self) -> float:
-        return float(self.log_probabilities.max())
+        return self._maximum_extension
 
 
 class PairwiseMassPreservingScorer:
@@ -72,17 +72,30 @@ class PairwiseMassPreservingScorer:
         anchor_final_scores: torch.Tensor,
         pairwise_final_scores: torch.Tensor,
     ) -> None:
-        self.log_retained_mass = log_retained_mass.float().cpu()
-        self.anchor_log_conditional = torch.log_softmax(
+        retained_mass = log_retained_mass.float().cpu()
+        anchor_log_conditional = torch.log_softmax(
             anchor_final_scores.float(),
             dim=-1,
         ).cpu()
-        self.pairwise_log_conditional = torch.log_softmax(
+        pairwise_log_conditional = torch.log_softmax(
             pairwise_final_scores.float(),
             dim=-1,
         ).cpu()
-        self.depth = self.log_retained_mass.shape[0]
-        self.candidate_count = self.anchor_log_conditional.shape[0]
+        self.depth = retained_mass.shape[0]
+        self.candidate_count = anchor_log_conditional.shape[0]
+        anchor_extensions = retained_mass[0] + anchor_log_conditional
+        pairwise_extensions = (
+            retained_mass[1:, None, None] + pairwise_log_conditional
+        )
+        self.anchor_extensions = anchor_extensions.tolist()
+        self.pairwise_extensions = pairwise_extensions.tolist()
+        maximum = anchor_extensions.max()
+        self._pairwise_maximum = float("-inf")
+        if pairwise_extensions.numel():
+            pairwise_maximum = pairwise_extensions.max()
+            self._pairwise_maximum = float(pairwise_maximum)
+            maximum = torch.maximum(maximum, pairwise_maximum)
+        self._maximum_extension = float(maximum)
 
     def extension_log_score(
         self,
@@ -91,31 +104,17 @@ class PairwiseMassPreservingScorer:
         candidate_index: int,
     ) -> float:
         if depth_index == 0:
-            conditional = self.anchor_log_conditional[candidate_index]
-        else:
-            if predecessor_candidate_index is None:
-                raise ValueError(
-                    "pairwise scoring requires a predecessor after depth 1"
-                )
-            conditional = self.pairwise_log_conditional[
-                depth_index - 1,
-                predecessor_candidate_index,
-                candidate_index,
-            ]
-        return float(self.log_retained_mass[depth_index] + conditional)
+            return self.anchor_extensions[candidate_index]
+        if predecessor_candidate_index is None:
+            raise ValueError(
+                "pairwise scoring requires a predecessor after depth 1"
+            )
+        return self.pairwise_extensions[depth_index - 1][
+            predecessor_candidate_index
+        ][candidate_index]
 
     def maximum_extension_log_score(self) -> float:
-        anchor_max = (
-            self.log_retained_mass[0]
-            + self.anchor_log_conditional.max()
-        )
-        if self.depth == 1:
-            return float(anchor_max)
-        pairwise_max = (
-            self.log_retained_mass[1:, None, None]
-            + self.pairwise_log_conditional
-        ).max()
-        return float(torch.maximum(anchor_max, pairwise_max))
+        return self._maximum_extension
 
 
 class PairwiseAfterRootScorer(PairwiseMassPreservingScorer):
@@ -133,8 +132,11 @@ class PairwiseAfterRootScorer(PairwiseMassPreservingScorer):
             anchor_final_scores,
             pairwise_final_scores,
         )
-        self.root_log_probabilities = (
-            root_log_probabilities.float().cpu()
+        root_probabilities = root_log_probabilities.float().cpu()
+        self.root_log_probabilities = root_probabilities.tolist()
+        self._maximum_extension = max(
+            float(root_probabilities.max()),
+            self._pairwise_maximum,
         )
 
     def extension_log_score(
@@ -144,9 +146,7 @@ class PairwiseAfterRootScorer(PairwiseMassPreservingScorer):
         candidate_index: int,
     ) -> float:
         if depth_index == 0:
-            return float(
-                self.root_log_probabilities[candidate_index]
-            )
+            return self.root_log_probabilities[candidate_index]
         return super().extension_log_score(
             depth_index,
             predecessor_candidate_index,
@@ -154,42 +154,124 @@ class PairwiseAfterRootScorer(PairwiseMassPreservingScorer):
         )
 
     def maximum_extension_log_score(self) -> float:
-        root_max = self.root_log_probabilities.max()
-        if self.depth == 1:
-            return float(root_max)
-        pairwise_max = (
-            self.log_retained_mass[1:, None, None]
-            + self.pairwise_log_conditional
-        ).max()
-        return float(torch.maximum(root_max, pairwise_max))
+        return self._maximum_extension
 
 
-def build_scorers(trace_round: dict) -> dict[str, PrefixScorer]:
+def validate_lattice_tensors(
+    lattice: dict,
+    *,
+    expected_depth: int | None = None,
+    expected_candidate_count: int | None = None,
+    probability_tolerance: float = 1e-5,
+) -> tuple[int, int]:
+    candidate_token_ids = lattice["candidate_token_ids"]
+    unary_logits = lattice["candidate_unary_logits"]
+    unary_logsumexp = lattice["unary_logsumexp"]
+    anchor_final_scores = lattice["anchor_final_scores"]
+    pairwise_final_scores = lattice["pairwise_final_scores"]
+
+    if candidate_token_ids.ndim != 2:
+        raise ValueError(
+            "candidate_token_ids must have shape [depth, candidates], "
+            f"got {tuple(candidate_token_ids.shape)}"
+        )
+    depth, candidate_count = candidate_token_ids.shape
+    expected_shapes = {
+        "candidate_unary_logits": (depth, candidate_count),
+        "unary_logsumexp": (depth,),
+        "anchor_final_scores": (candidate_count,),
+        "pairwise_final_scores": (
+            max(depth - 1, 0),
+            candidate_count,
+            candidate_count,
+        ),
+    }
+    tensors = {
+        "candidate_unary_logits": unary_logits,
+        "unary_logsumexp": unary_logsumexp,
+        "anchor_final_scores": anchor_final_scores,
+        "pairwise_final_scores": pairwise_final_scores,
+    }
+    for name, expected_shape in expected_shapes.items():
+        if tuple(tensors[name].shape) != expected_shape:
+            raise ValueError(
+                f"{name} must have shape {expected_shape}, "
+                f"got {tuple(tensors[name].shape)}"
+            )
+    if expected_depth is not None and depth != expected_depth:
+        raise ValueError(
+            f"candidate depth must be {expected_depth}, got {depth}"
+        )
+    if (
+        expected_candidate_count is not None
+        and candidate_count != expected_candidate_count
+    ):
+        raise ValueError(
+            "candidate count must be "
+            f"{expected_candidate_count}, got {candidate_count}"
+        )
+
+    log_retained_mass = (
+        torch.logsumexp(unary_logits.float(), dim=-1)
+        - unary_logsumexp.float()
+    )
+    if bool(torch.any(log_retained_mass > probability_tolerance)):
+        raise ValueError(
+            "retained candidate probability mass exceeds one: "
+            f"maximum log mass {float(log_retained_mass.max())}"
+        )
+    return depth, candidate_count
+
+
+def build_scorer(
+    trace_round: dict,
+    name: str,
+    *,
+    validate: bool = True,
+) -> PrefixScorer:
+    if validate:
+        validate_lattice_tensors(trace_round)
     unary_logits = trace_round["candidate_unary_logits"].float()
     unary_logsumexp = trace_round["unary_logsumexp"].float()
     retained_logsumexp = torch.logsumexp(unary_logits, dim=-1)
     log_retained_mass = retained_logsumexp - unary_logsumexp
 
-    return {
-        UNARY_FULL_MASS: UnaryScorer(
+    if name == UNARY_FULL_MASS:
+        return UnaryScorer(
             UNARY_FULL_MASS,
             unary_logits - unary_logsumexp.unsqueeze(-1),
-        ),
-        UNARY_TRUNCATED: UnaryScorer(
+        )
+    if name == UNARY_TRUNCATED:
+        return UnaryScorer(
             UNARY_TRUNCATED,
             torch.log_softmax(unary_logits, dim=-1),
-        ),
-        PAIRWISE_MASS_PRESERVING: PairwiseMassPreservingScorer(
+        )
+    if name == PAIRWISE_MASS_PRESERVING:
+        return PairwiseMassPreservingScorer(
             log_retained_mass,
             trace_round["anchor_final_scores"],
             trace_round["pairwise_final_scores"],
-        ),
-        PAIRWISE_AFTER_ROOT: PairwiseAfterRootScorer(
+        )
+    if name == PAIRWISE_AFTER_ROOT:
+        return PairwiseAfterRootScorer(
             unary_logits[0] - unary_logsumexp[0],
             log_retained_mass,
             trace_round["anchor_final_scores"],
             trace_round["pairwise_final_scores"],
-        ),
+        )
+    raise ValueError(f"unknown scorer {name!r}")
+
+
+def build_scorers(trace_round: dict) -> dict[str, PrefixScorer]:
+    validate_lattice_tensors(trace_round)
+    return {
+        name: build_scorer(trace_round, name, validate=False)
+        for name in (
+            UNARY_FULL_MASS,
+            UNARY_TRUNCATED,
+            PAIRWISE_MASS_PRESERVING,
+            PAIRWISE_AFTER_ROOT,
+        )
     }
 
 

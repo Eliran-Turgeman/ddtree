@@ -25,6 +25,10 @@ BASE_COLUMNS = [
     "total_decode_time_seconds",
     "decode_rounds",
     "mean_acceptance_length",
+    "mean_matched_draft_tokens",
+    "mean_committed_tokens_per_round",
+    "full_block_acceptance",
+    "verifier_bonus_commit_rate",
     "speedup_vs_baseline",
     "matches_baseline",
 ]
@@ -37,12 +41,20 @@ def method_sort_key(method: str) -> tuple[int, int]:
         return (1, 0)
     if method.startswith("ddtree_tb"):
         return (2, int(method.removeprefix("ddtree_tb")))
-    return (3, 0)
+    if method == "dflash2":
+        return (3, 0)
+    if method.startswith("dflash2_unary_k16_tb"):
+        return (4, int(method.rsplit("tb", maxsplit=1)[1]))
+    if method.startswith("dflash2_pairwise_k16_tb"):
+        return (5, int(method.rsplit("tb", maxsplit=1)[1]))
+    return (6, 0)
 
 
 def tree_budget(method: str) -> int | str:
     if method.startswith("ddtree_tb"):
         return int(method.removeprefix("ddtree_tb"))
+    if "_tb" in method:
+        return int(method.rsplit("tb", maxsplit=1)[1])
     return ""
 
 
@@ -76,6 +88,29 @@ def build_rows(run: dict) -> tuple[list[dict[str, object]], list[str]]:
             result = response[method]
             time_per_token = float(result.time_per_output_token)
             acceptance_lengths = result.acceptance_lengths
+            matched_draft_tokens = getattr(
+                result,
+                "matched_draft_tokens_per_round",
+                [],
+            )
+            if (
+                not matched_draft_tokens
+                and method.startswith("ddtree_tb")
+            ):
+                matched_draft_tokens = [
+                    max(int(value) - 1, 0)
+                    for value in acceptance_lengths
+                ]
+            committed_tokens = getattr(
+                result,
+                "committed_tokens_per_round",
+                [],
+            )
+            bonus_committed = getattr(
+                result,
+                "verifier_bonus_committed_per_round",
+                [],
+            )
             row = {
                 "sample_index": sample_index,
                 "dataset": args["dataset"],
@@ -93,6 +128,25 @@ def build_rows(run: dict) -> tuple[list[dict[str, object]], list[str]]:
                 "total_decode_time_seconds": time_per_token * result.num_output_tokens,
                 "decode_rounds": result.decode_rounds,
                 "mean_acceptance_length": mean(acceptance_lengths) if acceptance_lengths else "",
+                "mean_matched_draft_tokens": (
+                    mean(matched_draft_tokens)
+                    if matched_draft_tokens
+                    else ""
+                ),
+                "mean_committed_tokens_per_round": (
+                    mean(committed_tokens) if committed_tokens else ""
+                ),
+                "full_block_acceptance": (
+                    mean(
+                        value == run["block_size"] - 1
+                        for value in matched_draft_tokens
+                    )
+                    if matched_draft_tokens
+                    else ""
+                ),
+                "verifier_bonus_commit_rate": (
+                    mean(bonus_committed) if bonus_committed else ""
+                ),
                 "speedup_vs_baseline": baseline_time / time_per_token if time_per_token > 0 else "",
                 "matches_baseline": (
                     True
@@ -107,9 +161,41 @@ def build_rows(run: dict) -> tuple[list[dict[str, object]], list[str]]:
     return rows, stage_names
 
 
+def build_round_rows(run: dict) -> list[dict[str, object]]:
+    rows = []
+    for sample_index, response in enumerate(run["responses"]):
+        for method, result in response.items():
+            for metric in getattr(result, "round_metrics", []):
+                row = {
+                    "sample_index": sample_index,
+                    "method_key": method,
+                    **metric,
+                }
+                if isinstance(row.get("nodes_per_depth"), list):
+                    for depth, count in enumerate(
+                        row.pop("nodes_per_depth"),
+                        start=1,
+                    ):
+                        row[f"nodes_at_depth_{depth}"] = count
+                row.pop("tree", None)
+                rows.append(row)
+    return rows
+
+
 def write_csv(path: Path, rows: list[dict[str, object]], stage_names: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = BASE_COLUMNS + [f"stage_{stage_name}_seconds" for stage_name in stage_names]
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_round_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        return
+    fieldnames = list(rows[0])
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
@@ -124,24 +210,24 @@ def print_summary(rows: list[dict[str, object]]) -> None:
     print()
     print(
         f"{'Method':<16} {'ms/token':>10} {'tokens/s':>10} "
-        f"{'speedup':>10} {'tokens/round':>12}"
+        f"{'speedup':>10} {'matched/round':>13}"
     )
     print("-" * 62)
     for method in methods:
         method_rows = [row for row in rows if row["method"] == method]
         mean_ms = mean(float(row["time_per_output_token_ms"]) for row in method_rows)
-        acceptance_rows = [
+        matched_rows = [
             row
             for row in method_rows
-            if row["mean_acceptance_length"] != ""
+            if row["mean_matched_draft_tokens"] != ""
             and int(row["decode_rounds"]) > 0
         ]
-        total_rounds = sum(int(row["decode_rounds"]) for row in acceptance_rows)
-        acceptance = (
+        total_rounds = sum(int(row["decode_rounds"]) for row in matched_rows)
+        matched = (
             sum(
-                float(row["mean_acceptance_length"])
+                float(row["mean_matched_draft_tokens"])
                 * int(row["decode_rounds"])
-                for row in acceptance_rows
+                for row in matched_rows
             )
             / total_rounds
             if total_rounds
@@ -152,14 +238,8 @@ def print_summary(rows: list[dict[str, object]]) -> None:
             f"{mean_ms:>10.2f} "
             f"{1000 / mean_ms:>10.2f} "
             f"{baseline_mean_ms / mean_ms:>9.2f}x "
-            f"{acceptance:>12.2f}"
+            f"{matched:>12.2f}"
         )
-
-    print()
-    print(
-        "tokens/round is round-weighted and includes the verifier-carried token; "
-        "subtract 1 for matched speculative tokens."
-    )
 
     match_rows = [
         row
@@ -183,15 +263,32 @@ def main() -> None:
         default=None,
         help="Output CSV path (default: next to the .pt file)",
     )
+    parser.add_argument(
+        "--rounds-csv",
+        type=Path,
+        default=None,
+        help="Round-level CSV path (default: <run>.rounds.csv)",
+    )
     args = parser.parse_args()
 
     csv_path = args.csv or args.run_path.with_suffix(".csv")
     run = load_run(args.run_path)
     rows, stage_names = build_rows(run)
     write_csv(csv_path, rows, stage_names)
+    round_rows = build_round_rows(run)
+    rounds_csv_path = (
+        args.rounds_csv
+        or args.run_path.with_suffix(".rounds.csv")
+    )
+    write_round_csv(rounds_csv_path, round_rows)
 
     print(f"Loaded {len(run['responses'])} samples from {args.run_path}")
     print(f"Wrote {len(rows)} sample-method rows to {csv_path}")
+    if round_rows:
+        print(
+            f"Wrote {len(round_rows)} round rows to "
+            f"{rounds_csv_path}"
+        )
     print_summary(rows)
 
 

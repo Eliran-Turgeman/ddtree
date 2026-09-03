@@ -10,6 +10,7 @@ from transformers import AutoModelForCausalLM, DynamicCache
 
 from model import DFlashDraftModel, sample, extract_context_feature
 from dflash import dflash_generate, cuda_time, empty_stage_times
+from offline_dflash2_trees import TreeNode
 
 
 DDTREE_STAGE_ORDER = ("draft", "tree_build", "tree_compile", "verify", "commit")
@@ -166,6 +167,95 @@ def build_ddtree_tree(
     parents = parents_np[:current_length].tolist()
 
     return node_token_ids, node_depths, parents, child_maps, visibility, build_subtimes
+
+
+def compile_generic_tree_for_verifier(
+    nodes: list[TreeNode],
+    budget: int,
+    depth_limit: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    list[int],
+    list[dict[int, int]],
+    torch.Tensor,
+]:
+    if budget < 0:
+        raise ValueError("tree budget must be non-negative")
+    if len(nodes) > budget:
+        raise ValueError(
+            f"tree has {len(nodes)} nodes but budget is {budget}"
+        )
+
+    node_token_ids = torch.empty(len(nodes), dtype=torch.long)
+    node_depths = torch.empty(len(nodes), dtype=torch.long)
+    parents = [-1]
+    child_maps: list[dict[int, int]] = [dict()]
+    visibility = torch.zeros(
+        (len(nodes) + 1, len(nodes) + 1),
+        dtype=torch.bool,
+    )
+    visibility[0, 0] = True
+
+    for node_index, node in enumerate(nodes):
+        if not 1 <= node.depth <= depth_limit:
+            raise ValueError(
+                f"node {node_index} depth {node.depth} is outside "
+                f"1..{depth_limit}"
+            )
+        if node.parent < -1 or node.parent >= node_index:
+            raise ValueError(
+                f"node {node_index} has invalid parent {node.parent}"
+            )
+        if len(node.path_candidate_indices) != node.depth:
+            raise ValueError(
+                f"node {node_index} path length does not match its depth"
+            )
+        if node.parent == -1:
+            if node.depth != 1:
+                raise ValueError(
+                    f"root child {node_index} must have depth 1"
+                )
+            verifier_parent = 0
+        else:
+            parent = nodes[node.parent]
+            if parent.depth != node.depth - 1:
+                raise ValueError(
+                    f"node {node_index} parent depth is inconsistent"
+                )
+            if (
+                node.path_candidate_indices[:-1]
+                != parent.path_candidate_indices
+            ):
+                raise ValueError(
+                    f"node {node_index} path does not extend its parent"
+                )
+            verifier_parent = node.parent + 1
+
+        verifier_index = node_index + 1
+        if node.token_id in child_maps[verifier_parent]:
+            raise ValueError(
+                "a verifier parent cannot have duplicate token children: "
+                f"parent={verifier_parent}, token={node.token_id}"
+            )
+        node_token_ids[node_index] = node.token_id
+        node_depths[node_index] = node.depth
+        parents.append(verifier_parent)
+        child_maps.append({})
+        child_maps[verifier_parent][node.token_id] = verifier_index
+        visibility[verifier_index, :verifier_index] = visibility[
+            verifier_parent,
+            :verifier_index,
+        ]
+        visibility[verifier_index, verifier_index] = True
+
+    return (
+        node_token_ids,
+        node_depths,
+        parents,
+        child_maps,
+        visibility,
+    )
 
 
 def compile_ddtree_tree(

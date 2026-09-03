@@ -63,6 +63,21 @@ python3 summarize_run.py runs/<experiment-name>/<run-name>.pt
 The CSV is written next to the `.pt` file by default. Use `--csv <path>` to
 choose a different output location.
 
+## DFlash2 Proof of Concept
+
+Verify that the experimental
+[`mgoin/Qwen3-4B-speculator.dflash2`](https://huggingface.co/mgoin/Qwen3-4B-speculator.dflash2)
+checkpoint generates the same greedy tokens as `Qwen/Qwen3-4B`:
+
+```bash
+python3 run_dflash2_smoke.py
+```
+
+The checkpoint uses seven speculative tokens, unary top-16 candidates, and a
+rank-256 predecessor-conditioned selector. It was trained with an experimental
+Speculators-native objective and is not an official reproduction of Inco's
+unpublished DFlash2 training recipe.
+
 ## Reproduce Paper Artifacts
 
 Generate the plots:

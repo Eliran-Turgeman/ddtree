@@ -1,5 +1,5 @@
 torch
-transformers
+transformers>=5.0,<5.17
 datasets
 flash-attn
 numpy

@@ -313,17 +313,6 @@ def main() -> None:
                         response["baseline"].output_ids,
                         response[method_key].output_ids,
                     )
-                    tree_token_matches.setdefault(method_key, []).append(
-                        response[method_key].matches_baseline
-                    )
-                    if not response[method_key].matches_baseline:
-                        logger.warning(
-                            f"{method_key} output differs from the "
-                            "sequential baseline for dataset index "
-                            f"{idx}. Inspect early or large divergences; "
-                            "occasional BF16 tree-shape argmax differences "
-                            "are possible."
-                        )
                     response[method_key].matches_baseline = matches_baseline
                     dflash2_token_matches.append(matches_baseline)
                     if not matches_baseline:
@@ -348,6 +337,17 @@ def main() -> None:
                         response["baseline"].output_ids,
                         response[method_key].output_ids,
                     )
+                    tree_token_matches.setdefault(method_key, []).append(
+                        response[method_key].matches_baseline
+                    )
+                    if not response[method_key].matches_baseline:
+                        logger.warning(
+                            f"{method_key} output differs from the "
+                            "sequential baseline for dataset index "
+                            f"{idx}. Inspect early or large divergences; "
+                            "occasional BF16 tree-shape argmax differences "
+                            "are possible."
+                        )
 
             spec_response = response[methods_to_run[-1]]
             generated_ids = spec_response.output_ids[0, spec_response.num_input_tokens :]

@@ -1,4 +1,5 @@
 .vscode
+.venv/
 .reader-venv/
 .copilot/
 .DS_Store

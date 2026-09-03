@@ -7,6 +7,7 @@ NPROC_PER_NODE="${NPROC_PER_NODE:-}"
 MASTER_PORT="${MASTER_PORT:-29600}"
 LOG_DIR="${LOG_DIR:-logs}"
 RUN_DIR="${RUN_DIR:-runs}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 TASKS=(
   "gsm8k:128"
@@ -57,6 +58,7 @@ Options:
   --nproc-per-node COUNT           Worker count (defaults to number of GPUs)
   --max-new-tokens COUNT           Generation limit per sample (default: 2048)
   --master-port PORT               torchrun master port (default: 29600)
+  --python PATH                    Python interpreter (default: python)
   --log-dir PATH                   Log output directory (default: logs)
   --run-dir PATH                   Benchmark output directory (default: runs)
   -h, --help                       Show this help
@@ -122,6 +124,10 @@ while [[ $# -gt 0 ]]; do
       MASTER_PORT="$2"
       shift 2
       ;;
+    --python)
+      PYTHON_BIN="$2"
+      shift 2
+      ;;
     --log-dir)
       LOG_DIR="$2"
       shift 2
@@ -180,6 +186,12 @@ fi
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
+if ! "${PYTHON_BIN}" -c "import torch, loguru" >/dev/null 2>&1; then
+  echo "Python environment '${PYTHON_BIN}' is missing benchmark dependencies." >&2
+  echo "Activate the project venv or pass --python /path/to/venv/bin/python." >&2
+  exit 2
+fi
+
 COMMON_BENCHMARK_ARGS=(
   --max-new-tokens "${MAX_NEW_TOKENS}"
 )
@@ -211,7 +223,7 @@ run_benchmark() {
     return
   fi
 
-  torchrun \
+  "${PYTHON_BIN}" -m torch.distributed.run \
     --nproc_per_node="${NPROC_PER_NODE}" \
     --master_port="${MASTER_PORT}" \
     benchmark.py \

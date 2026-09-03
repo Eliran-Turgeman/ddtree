@@ -2,6 +2,8 @@
 
 All results use the frozen Step-3 trace and make no model inference calls.
 
+Source snapshot: `c16676718c9f5d450af3b5d817b0b9385fd2b503`.
+
 Every method is restricted to the saved DFlash2 top-16 candidate lattice. `Unary-FullMass` uses the full-vocabulary log-normalizer but cannot select tokens outside that top 16; it is not unrestricted DDTree for budgets above 16.
 
 ## Mean matched draft tokens

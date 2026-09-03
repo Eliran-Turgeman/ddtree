@@ -13,6 +13,10 @@ No target-model or drafter inference was performed. The candidate lattice,
 unary logits, pairwise scores, prompts, decoding rounds, and realized
 continuations are identical for every method.
 
+The exact source, trace, and generated outputs used for this final Step-4
+snapshot are committed at
+`c16676718c9f5d450af3b5d817b0b9385fd2b503`.
+
 Every evaluated method is restricted to DFlash2's saved top-16 candidate
 lattice at each depth. `Unary-FullMass` means that retained candidate scores
 use the full-vocabulary unary log-normalizer; it does not mean the tree can

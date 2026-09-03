@@ -122,17 +122,31 @@ def print_summary(rows: list[dict[str, object]]) -> None:
     baseline_mean_ms = mean(float(row["time_per_output_token_ms"]) for row in baseline_rows)
 
     print()
-    print(f"{'Method':<16} {'ms/token':>10} {'tokens/s':>10} {'speedup':>10} {'acceptance':>12}")
+    print(
+        f"{'Method':<16} {'ms/token':>10} {'tokens/s':>10} "
+        f"{'speedup':>10} {'tokens/round':>12}"
+    )
     print("-" * 62)
     for method in methods:
         method_rows = [row for row in rows if row["method"] == method]
         mean_ms = mean(float(row["time_per_output_token_ms"]) for row in method_rows)
-        acceptance_values = [
-            float(row["mean_acceptance_length"])
+        acceptance_rows = [
+            row
             for row in method_rows
             if row["mean_acceptance_length"] != ""
+            and int(row["decode_rounds"]) > 0
         ]
-        acceptance = mean(acceptance_values) if acceptance_values else 0
+        total_rounds = sum(int(row["decode_rounds"]) for row in acceptance_rows)
+        acceptance = (
+            sum(
+                float(row["mean_acceptance_length"])
+                * int(row["decode_rounds"])
+                for row in acceptance_rows
+            )
+            / total_rounds
+            if total_rounds
+            else 0
+        )
         print(
             f"{method:<16} "
             f"{mean_ms:>10.2f} "
@@ -140,6 +154,12 @@ def print_summary(rows: list[dict[str, object]]) -> None:
             f"{baseline_mean_ms / mean_ms:>9.2f}x "
             f"{acceptance:>12.2f}"
         )
+
+    print()
+    print(
+        "tokens/round is round-weighted and includes the verifier-carried token; "
+        "subtract 1 for matched speculative tokens."
+    )
 
     match_rows = [
         row

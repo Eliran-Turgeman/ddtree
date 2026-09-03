@@ -42,12 +42,80 @@ def test_candidate_selector_walks_unary_path_without_corrections() -> None:
         unary_logits,
         torch.zeros(1, 2, 2),
         torch.tensor([0]),
+        collect_lattice=True,
     )
 
     assert proposal.token_ids.tolist() == [[1, 0]]
+    assert proposal.selected_candidate_indices.tolist() == [[0, 0]]
     assert proposal.candidate_ids.shape == (1, 2, 2)
     assert proposal.unary_scores.shape == (1, 2, 2)
+    assert proposal.unary_logsumexp.shape == (1, 2)
+    assert proposal.anchor_pairwise_corrections.shape == (1, 2)
+    assert proposal.pairwise_corrections.shape == (1, 1, 2, 2)
+    assert proposal.anchor_final_scores.shape == (1, 2)
+    assert proposal.pairwise_final_scores.shape == (1, 1, 2, 2)
+    assert torch.count_nonzero(proposal.anchor_pairwise_corrections) == 0
+    assert torch.count_nonzero(proposal.pairwise_corrections) == 0
     assert proposal.corrected_scores.shape == (1, 2, 2)
+
+
+def test_candidate_selector_exposes_raw_pairwise_corrections() -> None:
+    selector = CandidateSelector(
+        vocab_size=4,
+        hidden_size=1,
+        rank=1,
+        top_k=2,
+    )
+    with torch.no_grad():
+        selector.predecessor_codebook.copy_(
+            torch.tensor([[2.0], [3.0], [5.0], [7.0]])
+        )
+        selector.successor_codebook.copy_(
+            torch.tensor([[11.0], [13.0], [17.0], [19.0]])
+        )
+        selector.hidden_projection.weight.fill_(1.0)
+
+    unary_logits = torch.tensor(
+        [[[0.0, 5.0, 4.0, 1.0], [3.0, 1.0, 2.0, 6.0]]]
+    )
+    hidden_states = torch.tensor([[[7.0], [11.0]]])
+    normal_proposal = selector.select_path(
+        unary_logits,
+        hidden_states,
+        torch.tensor([0]),
+    )
+    proposal = selector.select_path(
+        unary_logits,
+        hidden_states,
+        torch.tensor([0]),
+        collect_lattice=True,
+    )
+
+    assert normal_proposal.anchor_pairwise_corrections is None
+    assert normal_proposal.pairwise_corrections is None
+    assert torch.equal(normal_proposal.token_ids, proposal.token_ids)
+    assert torch.equal(
+        normal_proposal.selected_candidate_indices,
+        proposal.selected_candidate_indices,
+    )
+    assert torch.equal(
+        normal_proposal.corrected_scores,
+        proposal.corrected_scores,
+    )
+    assert proposal.candidate_ids.tolist() == [[[1, 2], [3, 0]]]
+    assert proposal.selected_candidate_indices.tolist() == [[1, 0]]
+    assert torch.equal(
+        proposal.anchor_pairwise_corrections,
+        torch.tensor([[182.0, 238.0]]),
+    )
+    assert torch.equal(
+        proposal.pairwise_corrections,
+        torch.tensor([[[[627.0, 363.0], [1045.0, 605.0]]]]),
+    )
+    assert torch.equal(
+        proposal.corrected_scores,
+        torch.tensor([[[187.0, 242.0], [1051.0, 608.0]]]),
+    )
 
 
 def test_checkpoint_config_adapter_preserves_dflash2_contract() -> None:
@@ -85,6 +153,7 @@ def test_checkpoint_config_adapter_preserves_dflash2_contract() -> None:
             "sample_from_anchor": False,
             "selector_rank": 4,
             "selector_top_k": 2,
+            "_commit_hash": "draft-checkpoint-sha",
         }
     )
 
@@ -95,3 +164,4 @@ def test_checkpoint_config_adapter_preserves_dflash2_contract() -> None:
     }
     assert config.rope_parameters["rope_theta"] == 1_000_000
     assert config.selector_top_k == 2
+    assert config._commit_hash == "draft-checkpoint-sha"

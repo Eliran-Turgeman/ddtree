@@ -78,6 +78,15 @@ rank-256 predecessor-conditioned selector. It was trained with an experimental
 Speculators-native objective and is not an official reproduction of Inco's
 unpublished DFlash2 training recipe.
 
+`DFlash2Proposal` preserves the selector inputs without normalization:
+
+- `candidate_ids`: top-16 token IDs at each speculative position
+- `unary_scores`: raw unary logits for those candidates
+- `anchor_pairwise_corrections`: raw anchor-to-first-position corrections
+- `pairwise_corrections`: raw corrections for every adjacent top-16 candidate
+  pair, with shape `[batch, positions - 1, 16, 16]`
+- `corrected_scores`: unary plus pairwise scores along the selected greedy path
+
 Run the 32-sample GSM8K DFlash2 benchmark:
 
 ```bash
@@ -99,6 +108,51 @@ Exact token matches are recorded in the artifact and exported by
 `summarize_run.py`. DFlash2 is lossless at the decoding-algorithm level, but
 BF16 block verification can occasionally choose a different argmax near a
 logit tie because it uses different matrix shapes than one-token decoding.
+The summary reports round-weighted tokens per decoding round, including the
+verifier-carried token. Subtract one to obtain matched speculative tokens.
+
+### Collect DFlash2 research traces
+
+Collect the reproducible 32-prompt GSM8K trace used for offline unary-versus-
+pairwise tree-selection experiments:
+
+```bash
+python3 collect_dflash2_traces.py \
+  traces/2026-09-03_dflash2_a100-40gb_gsm8k-32/gsm8k__Qwen_Qwen3-4B__mgoin_Qwen3-4B-speculator.dflash2__seed0__traces.pt \
+  --max-samples 32 \
+  --seed 0
+```
+
+Inspect and validate the saved candidate lattice, selector scores, target
+observations, and prompt metadata:
+
+```bash
+python3 inspect_dflash2_traces.py \
+  traces/2026-09-03_dflash2_a100-40gb_gsm8k-32/gsm8k__Qwen_Qwen3-4B__mgoin_Qwen3-4B-speculator.dflash2__seed0__traces.pt
+```
+
+The collector does not make extra target-model calls and does not construct a
+DDTree. See `research_notes/dflash2_trace_schema.md` for the exact tensor
+definitions and target-token validity rules.
+
+### Evaluate unary and pairwise trees offline
+
+Run the frozen-trace UnaryTree versus PairwiseTree evaluation on DFlash2's
+saved top-16 candidate lattice:
+
+```bash
+python3 analyze_dflash2_trees.py \
+  traces/2026-09-03_dflash2_a100-40gb_gsm8k-32/gsm8k__Qwen_Qwen3-4B__mgoin_Qwen3-4B-speculator.dflash2__seed0__traces.pt \
+  analysis/2026-09-03_dflash2_unary-vs-pairwise \
+  --bootstrap-samples 10000
+```
+
+This analysis performs no model inference and does not modify the online
+decoder. `Unary-FullMass` uses the full-vocabulary unary normalizer but remains
+restricted to the saved top-16 token IDs, so it is not unrestricted DDTree at
+budgets above 16. See
+`research_notes/dflash2_offline_tree_evaluation.md` for the scorer definitions,
+results, and go/no-go recommendation.
 
 ## Reproduce Paper Artifacts
 

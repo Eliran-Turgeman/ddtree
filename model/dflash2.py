@@ -43,8 +43,14 @@ from .dflash import DFlashDraftModel, Qwen3DFlashDecoderLayer
 @dataclass
 class DFlash2Proposal:
     token_ids: torch.Tensor
+    selected_candidate_indices: torch.Tensor
     candidate_ids: torch.Tensor
     unary_scores: torch.Tensor
+    unary_logsumexp: torch.Tensor | None
+    anchor_pairwise_corrections: torch.Tensor | None
+    pairwise_corrections: torch.Tensor | None
+    anchor_final_scores: torch.Tensor | None
+    pairwise_final_scores: torch.Tensor | None
     corrected_scores: torch.Tensor
 
 
@@ -263,6 +269,41 @@ class CandidateSelector(nn.Module):
         self.successor_codebook = nn.Parameter(torch.empty(vocab_size, rank))
         self.hidden_projection = nn.Linear(hidden_size, rank, bias=False)
 
+    def pairwise_correction(
+        self,
+        hidden_states: torch.Tensor,
+        predecessor_ids: torch.Tensor,
+        candidate_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        predecessor = self.predecessor_codebook[predecessor_ids.long()]
+        projected_hidden = self.hidden_projection(hidden_states)
+        context = predecessor * projected_hidden.to(predecessor.dtype).unsqueeze(-2)
+        successors = self.successor_codebook[candidate_ids.long()]
+        return (
+            context.unsqueeze(-2)
+            * successors.unsqueeze(-3)
+        ).sum(dim=-1)
+
+    def score_candidate_components(
+        self,
+        unary_logits: torch.Tensor,
+        hidden_states: torch.Tensor,
+        predecessor_ids: torch.Tensor,
+        candidate_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        predecessor = self.predecessor_codebook[predecessor_ids.long()]
+        projected_hidden = self.hidden_projection(hidden_states)
+        context = predecessor * projected_hidden.to(predecessor.dtype)
+        successors = self.successor_codebook[candidate_ids.long()]
+        transition_scores = (
+            context.unsqueeze(-2) * successors
+        ).sum(dim=-1)
+        unary_scores = unary_logits.gather(-1, candidate_ids)
+        final_scores = unary_scores + transition_scores.to(
+            unary_scores.dtype
+        )
+        return unary_scores, transition_scores, final_scores
+
     def score_candidates(
         self,
         unary_logits: torch.Tensor,
@@ -270,45 +311,128 @@ class CandidateSelector(nn.Module):
         predecessor_ids: torch.Tensor,
         candidate_ids: torch.Tensor,
     ) -> torch.Tensor:
-        predecessor = self.predecessor_codebook[predecessor_ids.long()]
-        projected_hidden = self.hidden_projection(hidden_states)
-        context = predecessor * projected_hidden.to(predecessor.dtype)
-        successors = self.successor_codebook[candidate_ids.long()]
-        transition_scores = (context.unsqueeze(-2) * successors).sum(dim=-1)
-        unary_scores = unary_logits.gather(-1, candidate_ids)
-        return unary_scores + transition_scores.to(unary_scores.dtype)
+        return self.score_candidate_components(
+            unary_logits,
+            hidden_states,
+            predecessor_ids,
+            candidate_ids,
+        )[2]
 
     def select_path(
         self,
         unary_logits: torch.Tensor,
         hidden_states: torch.Tensor,
         anchor_ids: torch.Tensor,
+        *,
+        collect_lattice: bool = False,
     ) -> DFlash2Proposal:
         candidate_ids = unary_logits.topk(self.top_k, dim=-1).indices
         unary_scores = unary_logits.gather(-1, candidate_ids)
         predecessor_ids = anchor_ids
         path = []
+        selected_indices = []
+        selected_corrections = []
         corrected_scores = []
 
         for position in range(hidden_states.shape[1]):
-            position_scores = self.score_candidates(
-                unary_logits[:, position],
-                hidden_states[:, position],
-                predecessor_ids,
-                candidate_ids[:, position],
+            _, position_corrections, position_scores = (
+                self.score_candidate_components(
+                    unary_logits[:, position],
+                    hidden_states[:, position],
+                    predecessor_ids,
+                    candidate_ids[:, position],
+                )
             )
-            selected_indices = position_scores.argmax(dim=-1, keepdim=True)
-            predecessor_ids = candidate_ids[:, position].gather(
+            selected_predecessor_indices = position_scores.argmax(
+                dim=-1,
+                keepdim=True,
+            )
+            selected_token_ids = candidate_ids[:, position].gather(
                 -1,
-                selected_indices,
+                selected_predecessor_indices,
             )[:, 0]
-            path.append(predecessor_ids)
+            path.append(selected_token_ids)
+            selected_indices.append(selected_predecessor_indices[:, 0])
+            selected_corrections.append(position_corrections)
             corrected_scores.append(position_scores)
+            predecessor_ids = selected_token_ids
+
+        if collect_lattice:
+            unary_logsumexp = torch.logsumexp(
+                unary_logits.float(),
+                dim=-1,
+            )
+            anchor_pairwise_corrections = selected_corrections[0]
+            anchor_final_scores = corrected_scores[0]
+            pairwise_correction_rows = []
+            pairwise_final_score_rows = []
+            for position in range(1, hidden_states.shape[1]):
+                correction_matrix = self.pairwise_correction(
+                    hidden_states[:, position],
+                    candidate_ids[:, position - 1],
+                    candidate_ids[:, position],
+                )
+                selected_row_mask = torch.nn.functional.one_hot(
+                    selected_indices[position - 1],
+                    num_classes=self.top_k,
+                ).bool().unsqueeze(-1)
+                correction_matrix = torch.where(
+                    selected_row_mask,
+                    selected_corrections[position].unsqueeze(-2),
+                    correction_matrix,
+                )
+                final_score_matrix = (
+                    unary_scores[:, position].unsqueeze(-2)
+                    + correction_matrix.to(unary_scores.dtype)
+                )
+                final_score_matrix = torch.where(
+                    selected_row_mask,
+                    corrected_scores[position].unsqueeze(-2),
+                    final_score_matrix,
+                )
+                pairwise_correction_rows.append(correction_matrix)
+                pairwise_final_score_rows.append(final_score_matrix)
+
+            pairwise_corrections = (
+                torch.stack(pairwise_correction_rows, dim=1)
+                if pairwise_correction_rows
+                else unary_scores.new_empty(
+                    unary_scores.shape[0],
+                    0,
+                    self.top_k,
+                    self.top_k,
+                )
+            )
+            pairwise_final_scores = (
+                torch.stack(pairwise_final_score_rows, dim=1)
+                if pairwise_final_score_rows
+                else unary_scores.new_empty(
+                    unary_scores.shape[0],
+                    0,
+                    self.top_k,
+                    self.top_k,
+                )
+            )
+        else:
+            unary_logsumexp = None
+            anchor_pairwise_corrections = None
+            pairwise_corrections = None
+            anchor_final_scores = None
+            pairwise_final_scores = None
 
         return DFlash2Proposal(
             token_ids=torch.stack(path, dim=1),
+            selected_candidate_indices=torch.stack(
+                selected_indices,
+                dim=1,
+            ),
             candidate_ids=candidate_ids,
             unary_scores=unary_scores,
+            unary_logsumexp=unary_logsumexp,
+            anchor_pairwise_corrections=anchor_pairwise_corrections,
+            pairwise_corrections=pairwise_corrections,
+            anchor_final_scores=anchor_final_scores,
+            pairwise_final_scores=pairwise_final_scores,
             corrected_scores=torch.stack(corrected_scores, dim=1),
         )
 
@@ -326,6 +450,7 @@ class DFlash2DraftModel(DFlashDraftModel):
                 rope_parameters["rope_theta"],
             )
         layer_config = Qwen3Config.from_dict(transformer_config)
+        layer_config._commit_hash = config_dict.get("_commit_hash")
         layer_config.architectures = ["DFlash2DraftModel"]
         layer_config.block_size = config_dict["block_size"]
         layer_config.conv_kernel_size = config_dict["conv_kernel_size"]
@@ -410,10 +535,13 @@ class DFlash2DraftModel(DFlashDraftModel):
         self,
         hidden_states: torch.Tensor,
         anchor_ids: torch.Tensor,
+        *,
+        collect_lattice: bool = False,
     ) -> DFlash2Proposal:
         unary_logits = self.lm_head(hidden_states)
         return self.candidate_selector.select_path(
             unary_logits,
             hidden_states,
             anchor_ids,
+            collect_lattice=collect_lattice,
         )

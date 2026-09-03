@@ -1,0 +1,24 @@
+Trace: traces\2026-09-03_dflash2_a100-40gb_gsm8k-32\gsm8k__Qwen_Qwen3-4B__mgoin_Qwen3-4B-speculator.dflash2__seed0__traces.pt
+Prompts: 32
+Decoding rounds: 1913
+Tensor shape signatures: [((7, 16), (6, 16, 16))]
+Mean accepted draft tokens: 3.906
+Mean raw verifier-matched draft tokens: 3.916
+Mean committed tokens/round: 4.891
+Candidate consistency: 100.00%
+Pairwise score consistency: 100.00%
+DFlash2 path reproduction: 100.00%
+Direct verifier/realized-token agreement: 100.00%
+Trace size: 24.45 MiB (13402 bytes/round)
+
+Depth    Recall@16   Recall N   Conditional@16   Eligible N_d
+-----------------------------------------------------------------
+    1       99.79%       1913           99.79%           1913
+    2       97.64%       1909           99.23%           1690
+    3       93.85%       1902           98.40%           1434
+    4       90.15%       1898           97.91%           1198
+    5       87.44%       1895           98.34%           1023
+    6       83.64%       1895           97.64%            848
+    7       81.61%       1887           96.67%            691
+
+Recall@16 uses the eventual committed DFlash2 continuation. Conditional Recall@16 uses only target tokens directly observed while the selected prefix remains matched.

@@ -1,0 +1,5 @@
+method,maximum_extension_log_score,monotonic
+Unary-FullMass,0.0,True
+Unary-Truncated,0.0,True
+Pairwise-MassPreserving,0.0,True
+Pairwise-after-root,0.0,True

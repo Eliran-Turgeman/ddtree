@@ -10,8 +10,13 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import distributed as dist
-from model import DFlashDraftModel, load_and_process_dataset
+from model import (
+    DFlash2DraftModel,
+    DFlashDraftModel,
+    load_and_process_dataset,
+)
 from dflash import dflash_generate
+from dflash2 import dflash2_generate
 from ddtree import ddtree_generate, maybe_enable_cpp_compact
 
 
@@ -19,6 +24,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name-or-path", type=str, required=True)
     parser.add_argument("--draft-name-or-path", type=str, required=True)
+    parser.add_argument(
+        "--draft-type",
+        choices=("dflash", "dflash2"),
+        default="dflash",
+    )
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--tree-budget", type=str, default="16,32,64,128,256,512,1024")
     parser.add_argument("--dataset", type=str, required=True)
@@ -30,6 +40,12 @@ def main() -> None:
     parser.add_argument("--save-path", type=str, default=None)
     args = parser.parse_args()
 
+    if args.draft_type == "dflash2":
+        if args.temperature != 0.0:
+            parser.error("DFlash2 benchmarking currently supports greedy decoding only")
+        if args.flash_attn:
+            parser.error("DFlash2 benchmarking currently supports SDPA mode only")
+
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
@@ -38,9 +54,17 @@ def main() -> None:
     torch.backends.cudnn.benchmark = False
 
     dist.init()
+    if args.draft_type == "dflash2" and dist.size() != 1:
+        raise RuntimeError(
+            "DFlash2 proof-of-concept benchmarking currently requires one GPU"
+        )
     torch.cuda.set_device(dist.local_rank())
     device = torch.device(f"cuda:{dist.local_rank()}")
-    maybe_enable_cpp_compact(not args.disable_cpp_compact_cache)
+    maybe_enable_cpp_compact(
+        args.draft_type == "dflash"
+        and not args.flash_attn
+        and not args.disable_cpp_compact_cache
+    )
 
     def has_flash_attn() -> bool:
         try:
@@ -50,13 +74,17 @@ def main() -> None:
             return False
 
     installed_flash_attn = has_flash_attn()
-    if not installed_flash_attn:
+    if args.draft_type == "dflash" and not installed_flash_attn:
         raise RuntimeError("flash_attn must be installed because the draft DFlash model always uses FlashAttention")
 
     target_attn_implementation = "flash_attention_2" if args.flash_attn else "sdpa"
-    draft_attn_implementation = "flash_attention_2"
+    draft_attn_implementation = (
+        "flash_attention_2"
+        if args.draft_type == "dflash"
+        else "sdpa"
+    )
 
-    if not args.flash_attn and installed_flash_attn:
+    if args.draft_type == "dflash" and not args.flash_attn and installed_flash_attn:
         logger.warning("DDTree uses a custom tree attention mask on the target model. For compatibility, forcing the target verifier to torch.sdpa.")
 
     target = AutoModelForCausalLM.from_pretrained(
@@ -65,17 +93,35 @@ def main() -> None:
         dtype=torch.bfloat16,
     ).to(device).eval()
 
-    draft_model = DFlashDraftModel.from_pretrained(
+    draft_model_class = (
+        DFlashDraftModel
+        if args.draft_type == "dflash"
+        else DFlash2DraftModel
+    )
+    draft_model = draft_model_class.from_pretrained(
         args.draft_name_or_path,
         attn_implementation=draft_attn_implementation,
         dtype=torch.bfloat16,
     ).to(device).eval()
 
-    block_size = args.block_size if args.block_size is not None else draft_model.block_size
+    if (
+        args.draft_type == "dflash2"
+        and args.block_size is not None
+        and args.block_size != draft_model.block_size
+    ):
+        parser.error(
+            "DFlash2 block size is fixed by the checkpoint "
+            f"at {draft_model.block_size}"
+        )
+    block_size = (
+        args.block_size
+        if args.block_size is not None
+        else draft_model.block_size
+    )
     tree_budgets = [int(tree_budget) for tree_budget in args.tree_budget.split(",")]
-    methods_to_run = ["dflash"]
+    methods_to_run = [args.draft_type]
     method_key_to_tree_budget = {}
-    if not args.flash_attn:
+    if args.draft_type == "dflash" and not args.flash_attn:
         ddtree_method_keys = [f"ddtree_tb{tree_budget}" for tree_budget in tree_budgets]
         methods_to_run.extend(ddtree_method_keys)
         method_key_to_tree_budget.update({f"ddtree_tb{tree_budget}": tree_budget for tree_budget in tree_budgets})
@@ -117,7 +163,7 @@ def main() -> None:
                 stop_token_ids=[tokenizer.eos_token_id],
                 temperature=args.temperature,
             )
-        else:
+        elif method_key.startswith("ddtree_tb"):
             _ = ddtree_generate(
                 model=draft_model,
                 target=target,
@@ -128,6 +174,14 @@ def main() -> None:
                 tree_budget=method_key_to_tree_budget[method_key],
                 stop_token_ids=[tokenizer.eos_token_id],
                 temperature=args.temperature,
+            )
+        else:
+            _ = dflash2_generate(
+                model=draft_model,
+                target=target,
+                input_ids=warmup_input_ids,
+                max_new_tokens=warmup_max_new_tokens,
+                stop_token_ids=[tokenizer.eos_token_id],
             )
 
     responses = []
@@ -168,7 +222,7 @@ def main() -> None:
                         stop_token_ids=[tokenizer.eos_token_id],
                         temperature=args.temperature,
                     )
-                else:
+                elif method_key.startswith("ddtree_tb"):
                     response[method_key] = ddtree_generate(
                         model=draft_model,
                         target=target,
@@ -180,6 +234,21 @@ def main() -> None:
                         stop_token_ids=[tokenizer.eos_token_id],
                         temperature=args.temperature,
                     )
+                else:
+                    response[method_key] = dflash2_generate(
+                        model=draft_model,
+                        target=target,
+                        input_ids=input_ids,
+                        max_new_tokens=args.max_new_tokens,
+                        stop_token_ids=[tokenizer.eos_token_id],
+                    )
+                    if not torch.equal(
+                        response["baseline"].output_ids,
+                        response[method_key].output_ids,
+                    ):
+                        raise RuntimeError(
+                            f"DFlash2 lossless token check failed for dataset index {idx}"
+                        )
 
             spec_response = response[methods_to_run[-1]]
             generated_ids = spec_response.output_ids[0, spec_response.num_input_tokens :]
@@ -196,6 +265,7 @@ def main() -> None:
     run_data = {
         "responses": responses,
         "block_size": block_size,
+        "draft_type": args.draft_type,
         "draft_attn_implementation": draft_attn_implementation,
         "target_attn_implementation": target_attn_implementation,
         "args": vars(args),

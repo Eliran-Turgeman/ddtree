@@ -7,6 +7,9 @@ from transformers import AutoModelForCausalLM, DynamicCache
 from model import DFlash2DraftModel, extract_context_feature
 
 
+DFLASH2_STAGE_ORDER = ("draft", "verify", "commit")
+
+
 def cuda_time() -> float:
     torch.cuda.synchronize()
     return time.perf_counter()
@@ -46,6 +49,7 @@ def dflash2_generate(
 
     past_key_values_target = DynamicCache()
     past_key_values_draft = DynamicCache()
+    stage_times = {stage_name: 0.0 for stage_name in DFLASH2_STAGE_ORDER}
 
     prefill_start = cuda_time()
     output = target(
@@ -67,6 +71,9 @@ def dflash2_generate(
 
     decode_start = cuda_time()
     acceptance_lengths = []
+    round_timestamps = []
+    round_clock_start = cuda_time()
+    draft_prefill = True
     start = num_input_tokens
     stopped = (
         stop_tokens is not None
@@ -78,6 +85,7 @@ def dflash2_generate(
         block_output_ids = output_ids[:, start : start + verify_size].clone()
         block_position_ids = position_ids[:, start : start + verify_size]
 
+        draft_start = cuda_time()
         noise_embedding = model.embed_tokens(block_output_ids)
         draft_hidden = model(
             target_hidden=target_hidden,
@@ -92,7 +100,15 @@ def dflash2_generate(
         past_key_values_draft.crop(start)
         proposal = model.propose(draft_hidden, block_output_ids[:, 0])
         block_output_ids[:, 1:] = proposal.token_ids
+        draft_elapsed = cuda_time() - draft_start
+        if draft_prefill:
+            draft_prefill = False
+            decode_start = cuda_time()
+            round_clock_start = decode_start
+        else:
+            stage_times["draft"] += draft_elapsed
 
+        verify_start = cuda_time()
         output = target(
             block_output_ids,
             position_ids=block_position_ids,
@@ -100,6 +116,9 @@ def dflash2_generate(
             use_cache=True,
             output_hidden_states=True,
         )
+        stage_times["verify"] += cuda_time() - verify_start
+
+        commit_start = cuda_time()
         posterior = output.logits.argmax(dim=-1)
         acceptance_length = (
             (block_output_ids[:, 1:] == posterior[:, :-1])
@@ -131,6 +150,8 @@ def dflash2_generate(
             output.hidden_states,
             model.target_layer_ids,
         )[:, :produced, :]
+        stage_times["commit"] += cuda_time() - commit_start
+        round_timestamps.append(cuda_time() - round_clock_start)
 
     output_ids = output_ids[:, : min(start + 1, max_length)]
     num_output_tokens = output_ids.shape[1] - num_input_tokens
@@ -144,4 +165,6 @@ def dflash2_generate(
         time_per_output_token=total_decode_time / max(num_output_tokens, 1),
         acceptance_lengths=acceptance_lengths,
         decode_rounds=len(acceptance_lengths),
+        stage_times=stage_times,
+        round_timestamps=round_timestamps,
     )

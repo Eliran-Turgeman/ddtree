@@ -38,6 +38,7 @@ MODES=(
 )
 
 MAX_NEW_TOKENS=2048
+DRAFT_TYPE="dflash"
 
 usage() {
   cat <<'EOF'
@@ -51,6 +52,7 @@ Options:
   --model-draft-pair MODEL|DRAFT   Target and draft model pair (repeatable)
   --temperature VALUE              Sampling temperature (repeatable)
   --mode MODE                      sdpa or flash_attn (repeatable)
+  --draft-type TYPE                dflash or dflash2 (default: dflash)
   --gpus IDS                       CUDA device IDs, for example 0 or 0,1
   --nproc-per-node COUNT           Worker count (defaults to number of GPUs)
   --max-new-tokens COUNT           Generation limit per sample (default: 2048)
@@ -98,6 +100,10 @@ while [[ $# -gt 0 ]]; do
         custom_modes=true
       fi
       MODES+=("$2")
+      shift 2
+      ;;
+    --draft-type)
+      DRAFT_TYPE="$2"
       shift 2
       ;;
     --gpus)
@@ -149,6 +155,29 @@ for mode in "${MODES[@]}"; do
   fi
 done
 
+if [[ "${DRAFT_TYPE}" != "dflash" && "${DRAFT_TYPE}" != "dflash2" ]]; then
+  echo "Invalid draft type '${DRAFT_TYPE}': expected dflash or dflash2" >&2
+  exit 2
+fi
+if [[ "${DRAFT_TYPE}" == "dflash2" ]]; then
+  if [[ "${NPROC_PER_NODE}" != "1" ]]; then
+    echo "DFlash2 proof-of-concept benchmarking currently requires one GPU" >&2
+    exit 2
+  fi
+  for mode in "${MODES[@]}"; do
+    if [[ "${mode}" != "sdpa" ]]; then
+      echo "DFlash2 currently supports only --mode sdpa" >&2
+      exit 2
+    fi
+  done
+  for temperature in "${TEMPERATURES[@]}"; do
+    if [[ "${temperature}" != "0" && "${temperature}" != "0.0" ]]; then
+      echo "DFlash2 currently supports only --temperature 0.0" >&2
+      exit 2
+    fi
+  done
+fi
+
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 COMMON_BENCHMARK_ARGS=(
@@ -190,6 +219,7 @@ run_benchmark() {
     --max-samples "${max_samples}" \
     --model-name-or-path "${model_name}" \
     --draft-name-or-path "${draft_name}" \
+    --draft-type "${DRAFT_TYPE}" \
     --save-path "${save_path}" \
     "${COMMON_BENCHMARK_ARGS[@]}" \
     "$@" \
@@ -207,6 +237,9 @@ for task in "${TASKS[@]}"; do
     for temperature in "${TEMPERATURES[@]}"; do
       temperature_slug="$(slugify "${temperature}")"
       run_name="${dataset_name}__${model_slug}__${draft_slug}__temp${temperature_slug}"
+      if [[ "${DRAFT_TYPE}" != "dflash" ]]; then
+        run_name="${run_name}__${DRAFT_TYPE}"
+      fi
 
       for mode in "${MODES[@]}"; do
         mode_args=()

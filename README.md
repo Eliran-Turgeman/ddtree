@@ -154,6 +154,47 @@ budgets above 16. See
 `research_notes/dflash2_offline_tree_evaluation.md` for the scorer definitions,
 results, and go/no-go recommendation.
 
+### Run the controlled online DFlash2 tree experiment
+
+The Step-5 prototype compares DFlash2 greedy decoding with Unary-K16 and
+Pairwise-K16 trees while reusing DDTree's existing target verifier:
+
+```bash
+bash run_benchmark.sh \
+  --gpus 0 \
+  --task gsm8k:32 \
+  --model-draft-pair \
+    'Qwen/Qwen3-4B|mgoin/Qwen3-4B-speculator.dflash2' \
+  --draft-type dflash2 \
+  --tree-budget 7,8,16,32,64 \
+  --temperature 0.0 \
+  --mode sdpa \
+  --max-new-tokens 2048 \
+  --run-dir runs/2026-09-03_step5-online_a100_gsm8k-32 \
+  --log-dir logs/2026-09-03_step5-online_a100_gsm8k-32
+```
+
+Export prompt- and round-level measurements:
+
+```bash
+python summarize_run.py \
+  runs/2026-09-03_step5-online_a100_gsm8k-32/*.pt
+```
+
+Generate prompt-bootstrap acceptance, throughput, timing, and
+offline-versus-online comparisons:
+
+```bash
+python analyze_online_dflash2.py \
+  runs/2026-09-03_step5-online_a100_gsm8k-32/*.pt \
+  analysis/2026-09-03_step5-online_a100_gsm8k-32 \
+  --bootstrap-samples 10000
+```
+
+The benchmark records `matched_draft_tokens`,
+`committed_tokens_this_round`, and `verifier_bonus_committed` separately for
+every online round. CUDA synchronization is used at each timing boundary.
+
 ## Reproduce Paper Artifacts
 
 Generate the plots:

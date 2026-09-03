@@ -26,6 +26,7 @@ BASE_COLUMNS = [
     "decode_rounds",
     "mean_acceptance_length",
     "speedup_vs_baseline",
+    "matches_baseline",
 ]
 
 
@@ -93,6 +94,11 @@ def build_rows(run: dict) -> tuple[list[dict[str, object]], list[str]]:
                 "decode_rounds": result.decode_rounds,
                 "mean_acceptance_length": mean(acceptance_lengths) if acceptance_lengths else "",
                 "speedup_vs_baseline": baseline_time / time_per_token if time_per_token > 0 else "",
+                "matches_baseline": (
+                    True
+                    if method == "baseline"
+                    else getattr(result, "matches_baseline", "")
+                ),
             }
             for stage_name in stage_names:
                 row[f"stage_{stage_name}_seconds"] = float(result.stage_times.get(stage_name, 0))
@@ -134,6 +140,16 @@ def print_summary(rows: list[dict[str, object]]) -> None:
             f"{baseline_mean_ms / mean_ms:>9.2f}x "
             f"{acceptance:>12.2f}"
         )
+
+    match_rows = [
+        row
+        for row in rows
+        if row["method"] == "dflash2" and row["matches_baseline"] != ""
+    ]
+    if match_rows:
+        matches = sum(row["matches_baseline"] is True for row in match_rows)
+        print()
+        print(f"DFlash2 exact token matches: {matches}/{len(match_rows)}")
 
 
 def main() -> None:

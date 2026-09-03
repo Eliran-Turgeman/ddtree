@@ -34,19 +34,34 @@ This produces benchmark outputs in `runs/` and logs in `logs/`.
 To run a limited GSM8K benchmark on one Lambda Cloud GPU:
 
 ```bash
+EXPERIMENT="2026-09-02_initial-reproduction_a100-40gb_gsm8k-32"
+
 bash run_benchmark.sh \
   --gpus 0 \
   --task gsm8k:32 \
   --model-draft-pair 'Qwen/Qwen3-4B|z-lab/Qwen3-4B-DFlash-b16' \
   --temperature 0.0 \
-  --mode sdpa
+  --mode sdpa \
+  --run-dir "runs/${EXPERIMENT}" \
+  --log-dir "logs/${EXPERIMENT}"
 ```
 
 This runs the baseline, DFlash, and DDTree methods for 32 examples using one
-worker. Use `bash run_benchmark.sh --help` to see all sweep parameters. The
-model weights, dataset, and FlashAttention dependency are downloaded on the
-first run, so the Lambda instance needs Hugging Face access and enough local
-storage for both models.
+worker. Give each experiment the same descriptive subfolder name under
+`runs/` and `logs/` so its artifacts remain paired. Use
+`bash run_benchmark.sh --help` to see all sweep parameters. The model weights,
+dataset, and FlashAttention dependency are downloaded on the first run, so the
+Lambda instance needs Hugging Face access and enough local storage for both
+models.
+
+Summarize a single benchmark artifact and export sample-level data to CSV:
+
+```bash
+python3 summarize_run.py runs/<experiment-name>/<run-name>.pt
+```
+
+The CSV is written next to the `.pt` file by default. Use `--csv <path>` to
+choose a different output location.
 
 ## Reproduce Paper Artifacts
 

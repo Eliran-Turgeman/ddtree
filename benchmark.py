@@ -38,7 +38,12 @@ def repository_metadata() -> dict[str, object]:
         ).stdout.strip()
         dirty = bool(
             subprocess.run(
-                ["git", "status", "--porcelain"],
+                [
+                    "git",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                ],
                 check=True,
                 capture_output=True,
                 text=True,

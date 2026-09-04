@@ -55,6 +55,12 @@ def repository_metadata() -> dict[str, object]:
     return {"commit": commit, "dirty": dirty}
 
 
+def atomic_torch_save(value: object, path: Path) -> None:
+    temporary_path = path.with_name(f"{path.name}.tmp")
+    torch.save(value, temporary_path)
+    temporary_path.replace(path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name-or-path", type=str, required=True)
@@ -241,13 +247,105 @@ def main() -> None:
                 tree_method=method_key_to_tree_method[method_key],
             )
 
+    save_path = Path(args.save_path) if args.save_path is not None else None
+    partial_path = (
+        save_path.with_name(f"{save_path.stem}.partial{save_path.suffix}")
+        if save_path is not None and dist.size() == 1
+        else None
+    )
     responses = []
-    dflash2_token_matches = []
-    tree_token_matches = {}
-    indices = range(dist.rank(), len(dataset), dist.size())
-    for idx in tqdm(indices, disable=not dist.is_main()):
+    completed_dataset_indices: set[int] = set()
+    if partial_path is not None and partial_path.exists():
+        partial_run = torch.load(
+            partial_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        if partial_run.get("args") != vars(args):
+            raise ValueError(
+                f"{partial_path} was created with different arguments"
+            )
+        responses = list(partial_run["responses"])
+        completed_dataset_indices = set(
+            partial_run["completed_dataset_indices"]
+        )
+        logger.info(
+            f"Resuming {partial_path} after "
+            f"{len(completed_dataset_indices)} completed samples"
+        )
+
+    def build_run_data() -> dict:
+        dflash2_matches = [
+            response["dflash2"].matches_baseline
+            for response in responses
+            if "dflash2" in response
+        ]
+        tree_matches = {
+            method_key: [
+                response[method_key].matches_baseline
+                for response in responses
+                if method_key in response
+            ]
+            for method_key in method_key_to_tree_method
+        }
+        run_data = {
+            "responses": responses,
+            "completed_dataset_indices": sorted(
+                completed_dataset_indices
+            ),
+            "block_size": block_size,
+            "draft_type": args.draft_type,
+            "draft_attn_implementation": draft_attn_implementation,
+            "target_attn_implementation": (
+                target_attn_implementation
+            ),
+            "args": vars(args),
+            "runtime": {
+                "python": platform.python_version(),
+                "pytorch": torch.__version__,
+                "transformers": transformers.__version__,
+                "cuda": torch.version.cuda,
+                "gpu": torch.cuda.get_device_name(device),
+                "decode_timing_excludes_first_draft_prefill": True,
+            },
+            "repository": repository_metadata(),
+            "target_revision": getattr(
+                target.config,
+                "_commit_hash",
+                None,
+            ),
+            "draft_revision": getattr(
+                draft_model.config,
+                "_commit_hash",
+                None,
+            ),
+        }
+        if args.draft_type == "dflash2":
+            run_data["exact_token_match_count"] = sum(dflash2_matches)
+            run_data["exact_token_match_total"] = len(dflash2_matches)
+            run_data["tree_exact_token_matches"] = {
+                method: {
+                    "count": sum(matches),
+                    "total": len(matches),
+                }
+                for method, matches in tree_matches.items()
+            }
+        return run_data
+
+    indices = list(range(dist.rank(), len(dataset), dist.size()))
+    pending_indices = [
+        idx for idx in indices if idx not in completed_dataset_indices
+    ]
+    progress = tqdm(
+        pending_indices,
+        disable=not dist.is_main(),
+        total=len(indices),
+        initial=len(indices) - len(pending_indices),
+    )
+    for idx in progress:
         instance = dataset[idx]
         messages = []
+        instance_responses = []
         for turn_index, user_content in enumerate(instance["turns"]):
             messages.append({"role": "user", "content": user_content})
             input_text = tokenizer.apply_chat_template(
@@ -314,7 +412,6 @@ def main() -> None:
                         response[method_key].output_ids,
                     )
                     response[method_key].matches_baseline = matches_baseline
-                    dflash2_token_matches.append(matches_baseline)
                     if not matches_baseline:
                         logger.warning(
                             "DFlash2 output differs from the sequential baseline "
@@ -337,9 +434,6 @@ def main() -> None:
                         response["baseline"].output_ids,
                         response[method_key].output_ids,
                     )
-                    tree_token_matches.setdefault(method_key, []).append(
-                        response[method_key].matches_baseline
-                    )
                     if not response[method_key].matches_baseline:
                         logger.warning(
                             f"{method_key} output differs from the "
@@ -353,7 +447,12 @@ def main() -> None:
             generated_ids = spec_response.output_ids[0, spec_response.num_input_tokens :]
             output_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
             messages.append({"role": "assistant", "content": output_text})
-            responses.append(response)
+            instance_responses.append(response)
+        responses.extend(instance_responses)
+        completed_dataset_indices.add(idx)
+        if partial_path is not None:
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_torch_save(build_run_data(), partial_path)
 
     if dist.size() > 1:
         responses = dist.gather(responses, dst=0)
@@ -361,44 +460,12 @@ def main() -> None:
             return
         responses = list(chain(*responses))
 
-    run_data = {
-        "responses": responses,
-        "block_size": block_size,
-        "draft_type": args.draft_type,
-        "draft_attn_implementation": draft_attn_implementation,
-        "target_attn_implementation": target_attn_implementation,
-        "args": vars(args),
-        "runtime": {
-            "python": platform.python_version(),
-            "pytorch": torch.__version__,
-            "transformers": transformers.__version__,
-            "cuda": torch.version.cuda,
-            "gpu": torch.cuda.get_device_name(device),
-            "decode_timing_excludes_first_draft_prefill": True,
-        },
-        "repository": repository_metadata(),
-        "target_revision": getattr(target.config, "_commit_hash", None),
-        "draft_revision": getattr(
-            draft_model.config,
-            "_commit_hash",
-            None,
-        ),
-    }
-    if args.draft_type == "dflash2":
-        run_data["exact_token_match_count"] = sum(dflash2_token_matches)
-        run_data["exact_token_match_total"] = len(dflash2_token_matches)
-        run_data["tree_exact_token_matches"] = {
-            method: {
-                "count": sum(matches),
-                "total": len(matches),
-            }
-            for method, matches in tree_token_matches.items()
-        }
-    
-    if args.save_path is not None:
-        save_path = Path(args.save_path)
+    run_data = build_run_data()
+    if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(run_data, save_path)
+        atomic_torch_save(run_data, save_path)
+        if partial_path is not None:
+            partial_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

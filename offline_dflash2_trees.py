@@ -280,7 +280,7 @@ def build_best_first_tree(
     scorer: PrefixScorer,
     budget: int,
     *,
-    monotonic_tolerance: float = 1e-6,
+    monotonic_tolerance: float = 1e-5,
 ) -> list[TreeNode]:
     if budget < 0:
         raise ValueError("budget must be non-negative")
@@ -316,6 +316,7 @@ def build_best_first_tree(
                 "non-monotonic root extension: "
                 f"log probability {log_score}"
             )
+        log_score = min(log_score, 0.0)
         path = (candidate_index,)
         heapq.heappush(
             frontier,
@@ -369,6 +370,7 @@ def build_best_first_tree(
                     "non-monotonic prefix score: "
                     f"parent={log_prefix_score}, child={child_log_score}"
                 )
+            child_log_score = min(child_log_score, log_prefix_score)
             child_path = path + (child_candidate_index,)
             heapq.heappush(
                 frontier,

@@ -12,6 +12,7 @@ from offline_dflash2_trees import (
     PAIRWISE_MASS_PRESERVING,
     UNARY_FULL_MASS,
     UNARY_TRUNCATED,
+    UnaryScorer,
     build_best_first_tree,
     build_scorers,
     greedy_path_matched_tokens,
@@ -75,6 +76,40 @@ def test_best_first_tree_is_prefix_closed() -> None:
             assert node.path_candidate_indices[:-1] == (
                 nodes[node.parent].path_candidate_indices
             )
+
+
+def test_best_first_tree_clamps_tolerated_positive_roundoff() -> None:
+    scorer = UnaryScorer(
+        UNARY_FULL_MASS,
+        torch.tensor(
+            [
+                [1.3113024e-6, -1.0],
+                [1.0e-6, -1.0],
+            ]
+        ),
+    )
+    nodes = build_best_first_tree(
+        torch.tensor([[10, 11], [20, 21]]),
+        scorer,
+        budget=2,
+    )
+
+    assert nodes[0].log_prefix_score == 0.0
+    assert nodes[1].log_prefix_score == 0.0
+
+
+def test_best_first_tree_rejects_material_positive_extension() -> None:
+    scorer = UnaryScorer(
+        UNARY_FULL_MASS,
+        torch.tensor([[2.0e-5, -1.0]]),
+    )
+
+    with pytest.raises(ValueError, match="non-monotonic root"):
+        build_best_first_tree(
+            torch.tensor([[10, 11]]),
+            scorer,
+            budget=1,
+        )
 
 
 def test_pairwise_depth_alignment_uses_parent_candidate() -> None:

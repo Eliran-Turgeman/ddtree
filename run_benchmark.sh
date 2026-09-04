@@ -41,6 +41,7 @@ MODES=(
 MAX_NEW_TOKENS=2048
 DRAFT_TYPE="dflash"
 TREE_BUDGETS=""
+NATIVE_METHOD_TRAJECTORIES=false
 
 usage() {
   cat <<'EOF'
@@ -59,6 +60,7 @@ Options:
   --nproc-per-node COUNT           Worker count (defaults to number of GPUs)
   --max-new-tokens COUNT           Generation limit per sample (default: 2048)
   --tree-budget LIST               Comma-separated tree budgets
+  --native-method-trajectories     Keep independent multi-turn histories per method
   --master-port PORT               torchrun master port (default: 29600)
   --python PATH                    Python interpreter (default: python)
   --log-dir PATH                   Log output directory (default: logs)
@@ -125,6 +127,10 @@ while [[ $# -gt 0 ]]; do
     --tree-budget)
       TREE_BUDGETS="$2"
       shift 2
+      ;;
+    --native-method-trajectories)
+      NATIVE_METHOD_TRAJECTORIES=true
+      shift
       ;;
     --master-port)
       MASTER_PORT="$2"
@@ -209,6 +215,9 @@ COMMON_BENCHMARK_ARGS=(
   --max-new-tokens "${MAX_NEW_TOKENS}"
   --tree-budget "${TREE_BUDGETS}"
 )
+if [[ "${NATIVE_METHOD_TRAJECTORIES}" == true ]]; then
+  COMMON_BENCHMARK_ARGS+=(--native-method-trajectories)
+fi
 
 slugify() {
   local value="$1"
@@ -265,6 +274,9 @@ for task in "${TASKS[@]}"; do
       run_name="${dataset_name}__${model_slug}__${draft_slug}__temp${temperature_slug}"
       if [[ "${DRAFT_TYPE}" != "dflash" ]]; then
         run_name="${run_name}__${DRAFT_TYPE}"
+      fi
+      if [[ "${NATIVE_METHOD_TRAJECTORIES}" == true ]]; then
+        run_name="${run_name}__native-trajectories"
       fi
 
       for mode in "${MODES[@]}"; do

@@ -78,6 +78,14 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--flash-attn", action="store_true")
     parser.add_argument("--disable-cpp-compact-cache", action="store_true")
+    parser.add_argument(
+        "--native-method-trajectories",
+        action="store_true",
+        help=(
+            "For multi-turn datasets, feed each method its own previous "
+            "assistant response instead of sharing the final method's history."
+        ),
+    )
     parser.add_argument("--save-path", type=str, default=None)
     args = parser.parse_args()
 
@@ -278,13 +286,29 @@ def main() -> None:
         dflash2_matches = [
             response["dflash2"].matches_baseline
             for response in responses
-            if "dflash2" in response
+            if (
+                "dflash2" in response
+                and isinstance(
+                    getattr(response["dflash2"], "matches_baseline", None),
+                    bool,
+                )
+            )
         ]
         tree_matches = {
             method_key: [
                 response[method_key].matches_baseline
                 for response in responses
-                if method_key in response
+                if (
+                    method_key in response
+                    and isinstance(
+                        getattr(
+                            response[method_key],
+                            "matches_baseline",
+                            None,
+                        ),
+                        bool,
+                    )
+                )
             ]
             for method_key in method_key_to_tree_method
         }
@@ -298,6 +322,11 @@ def main() -> None:
             "draft_attn_implementation": draft_attn_implementation,
             "target_attn_implementation": (
                 target_attn_implementation
+            ),
+            "trajectory_mode": (
+                "native"
+                if args.native_method_trajectories
+                else "controlled_shared"
             ),
             "args": vars(args),
             "runtime": {
@@ -344,37 +373,71 @@ def main() -> None:
     )
     for idx in progress:
         instance = dataset[idx]
-        messages = []
+        shared_messages = []
+        native_messages = {
+            method_key: []
+            for method_key in ("baseline", *methods_to_run)
+        }
         instance_responses = []
         for turn_index, user_content in enumerate(instance["turns"]):
-            messages.append({"role": "user", "content": user_content})
-            input_text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            input_ids = tokenizer.encode(input_text, return_tensors="pt").to(target.device)
-            prompt_hash = hashlib.sha256(
-                input_text.encode("utf-8")
-            ).hexdigest()
-            prompt_id = (
-                f"{args.dataset}:selected:{idx}:turn-{turn_index}:"
-                f"{prompt_hash[:12]}"
-            )
-
             response = {}
-            response["baseline"] = dflash_generate(
-                model=draft_model,
-                target=target,
-                input_ids=input_ids,
-                mask_token_id=draft_model.mask_token_id,
-                max_new_tokens=args.max_new_tokens,
-                block_size=1,
-                stop_token_ids=[tokenizer.eos_token_id],
-                temperature=args.temperature,
-            )
-            for method_key in methods_to_run:
+            for method_key in ("baseline", *methods_to_run):
+                messages = (
+                    native_messages[method_key]
+                    if args.native_method_trajectories
+                    else shared_messages
+                )
+                if (
+                    args.native_method_trajectories
+                    or method_key == "baseline"
+                ):
+                    messages.append(
+                        {"role": "user", "content": user_content}
+                    )
+                input_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                input_ids = tokenizer.encode(
+                    input_text,
+                    return_tensors="pt",
+                ).to(target.device)
+                prompt_hash = hashlib.sha256(
+                    input_text.encode("utf-8")
+                ).hexdigest()
+                prompt_id = (
+                    f"{args.dataset}:selected:{idx}:turn-{turn_index}:"
+                    f"{method_key}:{prompt_hash[:12]}"
+                )
+                if method_key == "baseline":
+                    response[method_key] = dflash_generate(
+                        model=draft_model,
+                        target=target,
+                        input_ids=input_ids,
+                        mask_token_id=draft_model.mask_token_id,
+                        max_new_tokens=args.max_new_tokens,
+                        block_size=1,
+                        stop_token_ids=[tokenizer.eos_token_id],
+                        temperature=args.temperature,
+                    )
+                    if args.native_method_trajectories:
+                        result = response[method_key]
+                        generated_ids = result.output_ids[
+                            0,
+                            result.num_input_tokens :,
+                        ]
+                        native_messages[method_key].append(
+                            {
+                                "role": "assistant",
+                                "content": tokenizer.decode(
+                                    generated_ids,
+                                    skip_special_tokens=True,
+                                ),
+                            }
+                        )
+                    continue
                 if method_key == "dflash":
                     response[method_key] = dflash_generate(
                         model=draft_model,
@@ -407,18 +470,6 @@ def main() -> None:
                         stop_token_ids=[tokenizer.eos_token_id],
                         prompt_id=prompt_id,
                     )
-                    matches_baseline = torch.equal(
-                        response["baseline"].output_ids,
-                        response[method_key].output_ids,
-                    )
-                    response[method_key].matches_baseline = matches_baseline
-                    if not matches_baseline:
-                        logger.warning(
-                            "DFlash2 output differs from the sequential baseline "
-                            f"for dataset index {idx}. This can occur near BF16 "
-                            "argmax ties because block verification uses different "
-                            "matrix shapes."
-                        )
                 else:
                     response[method_key] = dflash2_tree_generate(
                         model=draft_model,
@@ -430,6 +481,13 @@ def main() -> None:
                         tree_method=method_key_to_tree_method[method_key],
                         prompt_id=prompt_id,
                     )
+                comparable_to_baseline = (
+                    not args.native_method_trajectories
+                    or turn_index == 0
+                )
+                if comparable_to_baseline and method_key.startswith(
+                    "dflash2"
+                ):
                     response[method_key].matches_baseline = torch.equal(
                         response["baseline"].output_ids,
                         response[method_key].output_ids,
@@ -443,10 +501,37 @@ def main() -> None:
                             "are possible."
                         )
 
-            spec_response = response[methods_to_run[-1]]
-            generated_ids = spec_response.output_ids[0, spec_response.num_input_tokens :]
-            output_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            messages.append({"role": "assistant", "content": output_text})
+                if args.native_method_trajectories:
+                    result = response[method_key]
+                    generated_ids = result.output_ids[
+                        0,
+                        result.num_input_tokens :,
+                    ]
+                    native_messages[method_key].append(
+                        {
+                            "role": "assistant",
+                            "content": tokenizer.decode(
+                                generated_ids,
+                                skip_special_tokens=True,
+                            ),
+                        }
+                    )
+
+            if not args.native_method_trajectories:
+                spec_response = response[methods_to_run[-1]]
+                generated_ids = spec_response.output_ids[
+                    0,
+                    spec_response.num_input_tokens :,
+                ]
+                shared_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": tokenizer.decode(
+                            generated_ids,
+                            skip_special_tokens=True,
+                        ),
+                    }
+                )
             instance_responses.append(response)
         responses.extend(instance_responses)
         completed_dataset_indices.add(idx)

@@ -1,0 +1,10 @@
+method_key,method,budget,evaluated,passed,pass_at_1,evalplus_result
+baseline,target-only,,164,141,0.8597560975609756,baseline-sanitized_eval_results.json
+dflash2_pairwise_k16_tb16,pairwise,16,164,139,0.8475609756097561,dflash2_pairwise_k16_tb16-sanitized_eval_results.json
+dflash2_pairwise_k16_tb32,pairwise,32,164,140,0.8536585365853658,dflash2_pairwise_k16_tb32-sanitized_eval_results.json
+dflash2_pairwise_k16_tb64,pairwise,64,164,140,0.8536585365853658,dflash2_pairwise_k16_tb64-sanitized_eval_results.json
+dflash2_pairwise_k16_tb8,pairwise,8,164,138,0.8414634146341463,dflash2_pairwise_k16_tb8-sanitized_eval_results.json
+dflash2_unary_k16_tb16,unary,16,164,140,0.8536585365853658,dflash2_unary_k16_tb16-sanitized_eval_results.json
+dflash2_unary_k16_tb32,unary,32,164,136,0.8292682926829268,dflash2_unary_k16_tb32-sanitized_eval_results.json
+dflash2_unary_k16_tb64,unary,64,164,139,0.8475609756097561,dflash2_unary_k16_tb64-sanitized_eval_results.json
+dflash2_unary_k16_tb8,unary,8,164,140,0.8536585365853658,dflash2_unary_k16_tb8-sanitized_eval_results.json

@@ -1,0 +1,10 @@
+method_key,method,budget,evaluated,correct,accuracy
+baseline,target-only,,128,99,0.7734375
+dflash2_unary_k16_tb8,unary,8,128,100,0.78125
+dflash2_unary_k16_tb16,unary,16,128,101,0.7890625
+dflash2_unary_k16_tb32,unary,32,128,105,0.8203125
+dflash2_unary_k16_tb64,unary,64,128,100,0.78125
+dflash2_pairwise_k16_tb8,pairwise,8,128,103,0.8046875
+dflash2_pairwise_k16_tb16,pairwise,16,128,102,0.796875
+dflash2_pairwise_k16_tb32,pairwise,32,128,101,0.7890625
+dflash2_pairwise_k16_tb64,pairwise,64,128,99,0.7734375

@@ -1,0 +1,10 @@
+{
+  "dataset_order_sha256": "86711d44b048e5f71cafa2fb060a7d1c447323a31102f6b964e583677e3e80a4",
+  "dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+  "math_verify_version": "0.9.0",
+  "saved_prompt_hashes_validated": true,
+  "target_model": "Qwen/Qwen3-4B",
+  "target_revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+  "task": "math500",
+  "tokenizer_revision": "1cfa9a7208912126459214e8b04321603b3df60c"
+}

@@ -1,0 +1,10 @@
+method_key,method,budget,samples,path
+baseline,target-only,,164,baseline.jsonl
+dflash2_unary_k16_tb8,unary,8,164,dflash2_unary_k16_tb8.jsonl
+dflash2_unary_k16_tb16,unary,16,164,dflash2_unary_k16_tb16.jsonl
+dflash2_unary_k16_tb32,unary,32,164,dflash2_unary_k16_tb32.jsonl
+dflash2_unary_k16_tb64,unary,64,164,dflash2_unary_k16_tb64.jsonl
+dflash2_pairwise_k16_tb8,pairwise,8,164,dflash2_pairwise_k16_tb8.jsonl
+dflash2_pairwise_k16_tb16,pairwise,16,164,dflash2_pairwise_k16_tb16.jsonl
+dflash2_pairwise_k16_tb32,pairwise,32,164,dflash2_pairwise_k16_tb32.jsonl
+dflash2_pairwise_k16_tb64,pairwise,64,164,dflash2_pairwise_k16_tb64.jsonl

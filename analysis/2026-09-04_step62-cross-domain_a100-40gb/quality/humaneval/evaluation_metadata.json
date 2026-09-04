@@ -1,0 +1,10 @@
+{
+  "dataset_order_sha256": "bbae451a24d2543e392910a8ba3e6e6deab4fac2523fa21c6b09036bf84594fa",
+  "dataset_revision": "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
+  "math_verify_version": null,
+  "saved_prompt_hashes_validated": true,
+  "target_model": "Qwen/Qwen3-4B",
+  "target_revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+  "task": "humaneval",
+  "tokenizer_revision": "1cfa9a7208912126459214e8b04321603b3df60c"
+}

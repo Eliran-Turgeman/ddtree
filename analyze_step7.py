@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
         description="Analyze the Step-7 official 27B validation."
     )
     parser.add_argument("--gsm8k", type=Path, required=True)
+    parser.add_argument("--math500", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     return parser.parse_args()
@@ -63,18 +64,20 @@ def bootstrap_interval(
     return tuple(float(value) for value in np.quantile(estimates, [0.025, 0.975]))
 
 
-def load_and_validate(path: Path) -> dict:
+def load_and_validate(path: Path, dataset: str) -> dict:
     run = torch.load(path, map_location="cpu", weights_only=False)
     if len(run["responses"]) != 64:
-        raise ValueError("Step-7 GSM8K artifact must contain 64 prompts")
+        raise ValueError(f"Step-7 {dataset} artifact must contain 64 prompts")
     if run["target_revision"] != TARGET_REVISION:
         raise ValueError(f"unexpected target revision: {run['target_revision']}")
     if run["draft_revision"] != DRAFT_REVISION:
         raise ValueError(f"unexpected draft revision: {run['draft_revision']}")
-    if run["args"]["dataset"] != "gsm8k":
-        raise ValueError("Step-7 primary artifact must be GSM8K")
+    if run["args"]["dataset"] != dataset:
+        raise ValueError(
+            f"Step-7 artifact must be {dataset}, got {run['args']['dataset']}"
+        )
     if run["args"]["max_samples"] != 64:
-        raise ValueError("Step-7 primary artifact must use 64 prompts")
+        raise ValueError("Step-7 artifact must use 64 prompts")
     expected = {
         f"dflash2_{method}_k16_tb{budget}"
         for method in ("unary", "pairwise")
@@ -87,12 +90,49 @@ def load_and_validate(path: Path) -> dict:
     return run
 
 
-def main() -> None:
-    args = parse_args()
-    run = load_and_validate(args.gsm8k)
+def analyze_run(
+    dataset_name: str,
+    run: dict,
+    bootstrap_samples: int,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     method_rows = []
     comparison_rows = []
-
+    dataset_offset = 0 if dataset_name == "GSM8K" else 1000
+    greedy_prompts = [
+        prompt_metrics(response["dflash2"]) for response in run["responses"]
+    ]
+    greedy_rounds = [
+        row
+        for response in run["responses"]
+        for row in response["dflash2"].round_metrics
+    ]
+    method_rows.append(
+        {
+            "dataset": dataset_name,
+            "prompts": len(greedy_prompts),
+            "budget": 7,
+            "method": "DFlash2-greedy",
+            "mean_matched_draft_tokens": np.mean(
+                [row["matched"] for row in greedy_prompts]
+            ),
+            "full_block_acceptance": np.mean(
+                [row["full_block"] for row in greedy_prompts]
+            ),
+            "committed_tokens_per_round": np.mean(
+                [row["committed"] for row in greedy_prompts]
+            ),
+            "tokens_per_second": np.mean(
+                [row["tokens_per_second"] for row in greedy_prompts]
+            ),
+            "milliseconds_per_token": np.mean(
+                [row["milliseconds_per_token"] for row in greedy_prompts]
+            ),
+            "tree_build_ms_per_round": 0.0,
+            "verify_ms_per_round": np.mean(
+                [row["target_verify_latency_ms"] for row in greedy_rounds]
+            ),
+        }
+    )
     for budget in BUDGETS:
         methods = {}
         for method in ("unary", "pairwise"):
@@ -106,7 +146,7 @@ def main() -> None:
             methods[method] = prompts
             method_rows.append(
                 {
-                    "dataset": "GSM8K",
+                    "dataset": dataset_name,
                     "prompts": len(prompts),
                     "budget": budget,
                     "method": f"{method.title()}-K16",
@@ -158,17 +198,17 @@ def main() -> None:
         )
         matched_ci = bootstrap_interval(
             matched_differences,
-            args.bootstrap_samples,
-            budget,
+            bootstrap_samples,
+            dataset_offset + budget,
         )
         throughput_ci = bootstrap_interval(
             throughput_differences,
-            args.bootstrap_samples,
-            budget * 10,
+            bootstrap_samples,
+            dataset_offset + budget * 10,
         )
         comparison_rows.append(
             {
-                "dataset": "GSM8K",
+                "dataset": dataset_name,
                 "prompts": len(unary),
                 "budget": budget,
                 "pairwise_minus_unary_matched": (matched_differences.mean()),
@@ -184,12 +224,11 @@ def main() -> None:
                 "throughput_ci_high": throughput_ci[1],
             }
         )
+    return method_rows, comparison_rows
 
-    output_dir = args.output_dir
-    write_csv(output_dir / "method_metrics.csv", method_rows)
-    write_csv(output_dir / "pairwise_comparisons.csv", comparison_rows)
-    provenance = {
-        "source_artifact": str(args.gsm8k),
+
+def run_provenance(run: dict) -> dict[str, object]:
+    return {
         "target_revision": run["target_revision"],
         "draft_revision": run["draft_revision"],
         "repository": run["repository"],
@@ -197,6 +236,35 @@ def main() -> None:
         "exact_token_match_count": run["exact_token_match_count"],
         "exact_token_match_total": run["exact_token_match_total"],
         "tree_exact_token_matches": run["tree_exact_token_matches"],
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    runs = [("GSM8K", load_and_validate(args.gsm8k, "gsm8k"))]
+    if args.math500 is not None:
+        runs.append(("MATH500", load_and_validate(args.math500, "math500")))
+
+    method_rows = []
+    comparison_rows = []
+    for dataset_name, run in runs:
+        dataset_methods, dataset_comparisons = analyze_run(
+            dataset_name,
+            run,
+            args.bootstrap_samples,
+        )
+        method_rows.extend(dataset_methods)
+        comparison_rows.extend(dataset_comparisons)
+
+    output_dir = args.output_dir
+    write_csv(output_dir / "method_metrics.csv", method_rows)
+    write_csv(output_dir / "pairwise_comparisons.csv", comparison_rows)
+    provenance = {
+        "source_artifacts": {
+            "GSM8K": args.gsm8k.name,
+            "MATH500": (args.math500.name if args.math500 is not None else None),
+        },
+        "runs": {dataset_name: run_provenance(run) for dataset_name, run in runs},
         "bootstrap_seed": BOOTSTRAP_SEED,
         "bootstrap_samples": args.bootstrap_samples,
     }
@@ -205,7 +273,10 @@ def main() -> None:
         encoding="utf-8",
     )
     print(
-        json.dumps({"methods": method_rows, "comparisons": comparison_rows}, indent=2)
+        json.dumps(
+            {"methods": method_rows, "comparisons": comparison_rows},
+            indent=2,
+        )
     )
 
 

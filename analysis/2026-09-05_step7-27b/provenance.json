@@ -1,0 +1,102 @@
+{
+  "bootstrap_samples": 10000,
+  "bootstrap_seed": 20260905,
+  "runs": {
+    "GSM8K": {
+      "draft_revision": "dedf8df68adfb1afeaf7b7480c0a0243108177b4",
+      "exact_token_match_count": 0,
+      "exact_token_match_total": 64,
+      "repository": {
+        "commit": "6f791a77cb016583ac91fb6b4643c5ed4884c2b8",
+        "dirty": false
+      },
+      "runtime": {
+        "cuda": "12.8",
+        "decode_timing_excludes_first_draft_prefill": true,
+        "gpu": "NVIDIA H100 80GB HBM3",
+        "peak_allocated_gib": 54.19349479675293,
+        "peak_reserved_gib": 54.33984375,
+        "python": "3.10.12",
+        "pytorch": "2.7.0",
+        "transformers": "5.16.1"
+      },
+      "target_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "tree_exact_token_matches": {
+        "dflash2_pairwise_k16_tb16": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_pairwise_k16_tb32": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_pairwise_k16_tb64": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_unary_k16_tb16": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_unary_k16_tb32": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_unary_k16_tb64": {
+          "count": 64,
+          "total": 64
+        }
+      }
+    },
+    "MATH500": {
+      "draft_revision": "dedf8df68adfb1afeaf7b7480c0a0243108177b4",
+      "exact_token_match_count": 0,
+      "exact_token_match_total": 64,
+      "repository": {
+        "commit": "f4c56b83a6b18452d8da01b438141af6bd5eafef",
+        "dirty": false
+      },
+      "runtime": {
+        "cuda": "12.8",
+        "decode_timing_excludes_first_draft_prefill": true,
+        "gpu": "NVIDIA H100 80GB HBM3",
+        "peak_allocated_gib": 54.643386363983154,
+        "peak_reserved_gib": 54.8359375,
+        "python": "3.10.12",
+        "pytorch": "2.7.0",
+        "transformers": "5.16.1"
+      },
+      "target_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "tree_exact_token_matches": {
+        "dflash2_pairwise_k16_tb16": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_pairwise_k16_tb32": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_pairwise_k16_tb64": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_unary_k16_tb16": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_unary_k16_tb32": {
+          "count": 64,
+          "total": 64
+        },
+        "dflash2_unary_k16_tb64": {
+          "count": 64,
+          "total": 64
+        }
+      }
+    }
+  },
+  "source_artifacts": {
+    "GSM8K": "gsm8k_64.pt",
+    "MATH500": "math500_64.pt"
+  }
+}

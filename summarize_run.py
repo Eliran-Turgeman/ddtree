@@ -201,7 +201,9 @@ def write_round_csv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         return
-    fieldnames = list(rows[0])
+    fieldnames = list(
+        dict.fromkeys(key for row in rows for key in row)
+    )
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()

@@ -283,7 +283,7 @@ def analyze_unary_marginals(
             interval = bootstrap_interval(
                 difference,
                 bootstrap_samples,
-                budget * 100 + lower_k,
+                1_000_000 + budget * 100 + lower_k,
             )
             rows.append(
                 {
@@ -516,6 +516,105 @@ def analyze_dataset(
     }
 
 
+def build_matched_table(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    by_key = {
+        (str(row["dataset"]), int(row["budget"]), str(row["method"])): row
+        for row in rows
+    }
+    return [
+        {
+            "dataset": dataset,
+            "budget": budget,
+            "pairwise_k16": by_key[
+                (dataset, budget, "Pairwise-K16")
+            ]["mean_matched_draft_tokens"],
+            "unary_k16": by_key[
+                (dataset, budget, "Unary-K16")
+            ]["mean_matched_draft_tokens"],
+            "unary_k32": by_key[
+                (dataset, budget, "Unary-K32")
+            ]["mean_matched_draft_tokens"],
+            "unary_k64": by_key[
+                (dataset, budget, "Unary-K64")
+            ]["mean_matched_draft_tokens"],
+        }
+        for dataset in ("GSM8K", "MATH500")
+        for budget in BUDGETS
+    ]
+
+
+def build_pairwise_gain_table(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    by_key = {
+        (str(row["dataset"]), int(row["budget"]), int(row["unary_k"])): row
+        for row in rows
+    }
+    output = []
+    for dataset in ("GSM8K", "MATH500"):
+        for budget in BUDGETS:
+            row: dict[str, object] = {
+                "dataset": dataset,
+                "budget": budget,
+            }
+            for unary_k in (16, 32, 64):
+                comparison = by_key[(dataset, budget, unary_k)]
+                row[f"p16_minus_u{unary_k}"] = comparison["matched_gain"]
+                row[f"p16_minus_u{unary_k}_ci_low"] = comparison[
+                    "matched_ci_low"
+                ]
+                row[f"p16_minus_u{unary_k}_ci_high"] = comparison[
+                    "matched_ci_high"
+                ]
+            output.append(row)
+    return output
+
+
+def build_coverage_summary(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    output = []
+    for dataset in ("GSM8K", "MATH500"):
+        for support_k in (16, 32, 64):
+            for depth in range(1, 8):
+                selected = [
+                    row
+                    for row in rows
+                    if (
+                        row["dataset"] == dataset
+                        and int(row["support_k"]) == support_k
+                        and int(row["depth"]) == depth
+                    )
+                ]
+                observed = sum(
+                    int(row["observed_rounds"]) for row in selected
+                )
+                output.append(
+                    {
+                        "dataset": dataset,
+                        "trajectory_method": "Unary-K64",
+                        "support_k": support_k,
+                        "depth": depth,
+                        "observed_rounds": observed,
+                        "target_token_inclusion": sum(
+                            int(row["observed_rounds"])
+                            * float(row["target_token_inclusion"])
+                            for row in selected
+                        )
+                        / observed,
+                        "prefix_representability": sum(
+                            int(row["observed_rounds"])
+                            * float(row["prefix_representability"])
+                            for row in selected
+                        )
+                        / observed,
+                    }
+                )
+    return output
+
+
 def main() -> None:
     args = parse_args()
     tables: dict[str, list[dict[str, object]]] = {}
@@ -532,6 +631,15 @@ def main() -> None:
         for name, rows in analyzed.items():
             tables.setdefault(name, []).extend(rows)
 
+    tables["matched_table"] = build_matched_table(
+        tables["method_metrics"]
+    )
+    tables["pairwise_gain_table"] = build_pairwise_gain_table(
+        tables["pairwise_comparisons"]
+    )
+    tables["candidate_coverage_summary"] = build_coverage_summary(
+        tables["unary_k64_trajectory_coverage"]
+    )
     for name, rows in tables.items():
         write_csv(args.output_dir / f"{name}.csv", rows)
 

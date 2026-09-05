@@ -10,7 +10,7 @@ from ddtree import (
     follow_verified_tree,
 )
 from dflash import cuda_time, empty_stage_times
-from dflash2 import create_generation_cache, retain_cache_prefix
+from generation_cache import create_generation_cache, retain_cache_prefix
 from model import DFlash2DraftModel, extract_context_feature
 from model.dflash2 import DFlash2Proposal
 from offline_dflash2_trees import (

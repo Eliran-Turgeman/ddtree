@@ -15,8 +15,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import distributed as dist
 from model import (
-    DFlash2DraftModel,
     DFlashDraftModel,
+    load_dflash2_draft_model,
     load_and_process_dataset,
 )
 from dflash import dflash_generate
@@ -64,7 +64,9 @@ def atomic_torch_save(value: object, path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name-or-path", type=str, required=True)
+    parser.add_argument("--model-revision", type=str, default=None)
     parser.add_argument("--draft-name-or-path", type=str, required=True)
+    parser.add_argument("--draft-revision", type=str, default=None)
     parser.add_argument(
         "--draft-type",
         choices=("dflash", "dflash2"),
@@ -78,6 +80,10 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--flash-attn", action="store_true")
     parser.add_argument("--disable-cpp-compact-cache", action="store_true")
+    parser.add_argument(
+        "--dflash2-tree-methods",
+        default=",".join(DFLASH2_TREE_METHODS),
+    )
     parser.add_argument(
         "--native-method-trajectories",
         action="store_true",
@@ -94,6 +100,16 @@ def main() -> None:
             parser.error("DFlash2 benchmarking currently supports greedy decoding only")
         if args.flash_attn:
             parser.error("DFlash2 benchmarking currently supports SDPA mode only")
+        requested_tree_methods = args.dflash2_tree_methods.split(",")
+        invalid_tree_methods = sorted(
+            set(requested_tree_methods) - set(DFLASH2_TREE_METHODS)
+        )
+        if invalid_tree_methods:
+            parser.error(
+                "unsupported DFlash2 tree methods: " + ", ".join(invalid_tree_methods)
+            )
+    else:
+        requested_tree_methods = []
 
     random.seed(0)
     np.random.seed(0)
@@ -109,48 +125,59 @@ def main() -> None:
         )
     torch.cuda.set_device(dist.local_rank())
     device = torch.device(f"cuda:{dist.local_rank()}")
-    maybe_enable_cpp_compact(
-        not args.flash_attn
-        and not args.disable_cpp_compact_cache
-    )
+    maybe_enable_cpp_compact(not args.flash_attn and not args.disable_cpp_compact_cache)
 
     def has_flash_attn() -> bool:
         try:
             import flash_attn  # noqa: F401
+
             return True
         except ImportError:
             return False
 
     installed_flash_attn = has_flash_attn()
     if args.draft_type == "dflash" and not installed_flash_attn:
-        raise RuntimeError("flash_attn must be installed because the draft DFlash model always uses FlashAttention")
+        raise RuntimeError(
+            "flash_attn must be installed because the draft DFlash model always uses FlashAttention"
+        )
 
     target_attn_implementation = "flash_attention_2" if args.flash_attn else "sdpa"
     draft_attn_implementation = (
-        "flash_attention_2"
-        if args.draft_type == "dflash"
-        else "sdpa"
+        "flash_attention_2" if args.draft_type == "dflash" else "sdpa"
     )
 
     if args.draft_type == "dflash" and not args.flash_attn and installed_flash_attn:
-        logger.warning("DDTree uses a custom tree attention mask on the target model. For compatibility, forcing the target verifier to torch.sdpa.")
+        logger.warning(
+            "DDTree uses a custom tree attention mask on the target model. For compatibility, forcing the target verifier to torch.sdpa."
+        )
 
-    target = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        attn_implementation=target_attn_implementation,
-        dtype=torch.bfloat16,
-    ).to(device).eval()
-
-    draft_model_class = (
-        DFlashDraftModel
-        if args.draft_type == "dflash"
-        else DFlash2DraftModel
+    target = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            revision=args.model_revision,
+            attn_implementation=target_attn_implementation,
+            dtype=torch.bfloat16,
+        )
+        .to(device)
+        .eval()
     )
-    draft_model = draft_model_class.from_pretrained(
-        args.draft_name_or_path,
-        attn_implementation=draft_attn_implementation,
-        dtype=torch.bfloat16,
-    ).to(device).eval()
+
+    if args.draft_type == "dflash2":
+        draft_model, _draft_loading_info = load_dflash2_draft_model(
+            args.draft_name_or_path,
+            target=target,
+            revision=args.draft_revision,
+            attn_implementation=draft_attn_implementation,
+            dtype=torch.bfloat16,
+        )
+    else:
+        draft_model = DFlashDraftModel.from_pretrained(
+            args.draft_name_or_path,
+            revision=args.draft_revision,
+            attn_implementation=draft_attn_implementation,
+            dtype=torch.bfloat16,
+        )
+    draft_model = draft_model.to(device).eval()
 
     if (
         args.draft_type == "dflash2"
@@ -158,18 +185,12 @@ def main() -> None:
         and args.block_size != draft_model.block_size
     ):
         parser.error(
-            "DFlash2 block size is fixed by the checkpoint "
-            f"at {draft_model.block_size}"
+            f"DFlash2 block size is fixed by the checkpoint at {draft_model.block_size}"
         )
     block_size = (
-        args.block_size
-        if args.block_size is not None
-        else draft_model.block_size
+        args.block_size if args.block_size is not None else draft_model.block_size
     )
-    if (
-        args.draft_type == "dflash2"
-        and args.tree_budget == "16,32,64,128,256,512,1024"
-    ):
+    if args.draft_type == "dflash2" and args.tree_budget == "16,32,64,128,256,512,1024":
         args.tree_budget = "7,8,16,32,64"
     tree_budgets = [int(tree_budget) for tree_budget in args.tree_budget.split(",")]
     methods_to_run = [args.draft_type]
@@ -178,16 +199,21 @@ def main() -> None:
     if args.draft_type == "dflash" and not args.flash_attn:
         ddtree_method_keys = [f"ddtree_tb{tree_budget}" for tree_budget in tree_budgets]
         methods_to_run.extend(ddtree_method_keys)
-        method_key_to_tree_budget.update({f"ddtree_tb{tree_budget}": tree_budget for tree_budget in tree_budgets})
+        method_key_to_tree_budget.update(
+            {f"ddtree_tb{tree_budget}": tree_budget for tree_budget in tree_budgets}
+        )
     elif args.draft_type == "dflash2":
-        for tree_method in DFLASH2_TREE_METHODS:
+        for tree_method in requested_tree_methods:
             for tree_budget in tree_budgets:
                 method_key = f"{tree_method}_tb{tree_budget}"
                 methods_to_run.append(method_key)
                 method_key_to_tree_budget[method_key] = tree_budget
                 method_key_to_tree_method[method_key] = tree_method
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        revision=args.model_revision,
+    )
     dataset = load_and_process_dataset(args.dataset)
 
     if args.max_samples is not None and len(dataset) > args.max_samples:
@@ -199,7 +225,9 @@ def main() -> None:
         add_generation_prompt=True,
         enable_thinking=False,
     )
-    warmup_input_ids = tokenizer.encode(warmup_input_text, return_tensors="pt").to(target.device)
+    warmup_input_ids = tokenizer.encode(warmup_input_text, return_tensors="pt").to(
+        target.device
+    )
     warmup_max_new_tokens = min(args.max_new_tokens, 16)
 
     _ = dflash_generate(
@@ -270,13 +298,9 @@ def main() -> None:
             weights_only=False,
         )
         if partial_run.get("args") != vars(args):
-            raise ValueError(
-                f"{partial_path} was created with different arguments"
-            )
+            raise ValueError(f"{partial_path} was created with different arguments")
         responses = list(partial_run["responses"])
-        completed_dataset_indices = set(
-            partial_run["completed_dataset_indices"]
-        )
+        completed_dataset_indices = set(partial_run["completed_dataset_indices"])
         logger.info(
             f"Resuming {partial_path} after "
             f"{len(completed_dataset_indices)} completed samples"
@@ -314,19 +338,13 @@ def main() -> None:
         }
         run_data = {
             "responses": responses,
-            "completed_dataset_indices": sorted(
-                completed_dataset_indices
-            ),
+            "completed_dataset_indices": sorted(completed_dataset_indices),
             "block_size": block_size,
             "draft_type": args.draft_type,
             "draft_attn_implementation": draft_attn_implementation,
-            "target_attn_implementation": (
-                target_attn_implementation
-            ),
+            "target_attn_implementation": (target_attn_implementation),
             "trajectory_mode": (
-                "native"
-                if args.native_method_trajectories
-                else "controlled_shared"
+                "native" if args.native_method_trajectories else "controlled_shared"
             ),
             "args": vars(args),
             "runtime": {
@@ -335,6 +353,10 @@ def main() -> None:
                 "transformers": transformers.__version__,
                 "cuda": torch.version.cuda,
                 "gpu": torch.cuda.get_device_name(device),
+                "peak_allocated_gib": (
+                    torch.cuda.max_memory_allocated(device) / 1024**3
+                ),
+                "peak_reserved_gib": (torch.cuda.max_memory_reserved(device) / 1024**3),
                 "decode_timing_excludes_first_draft_prefill": True,
             },
             "repository": repository_metadata(),
@@ -342,12 +364,14 @@ def main() -> None:
                 target.config,
                 "_commit_hash",
                 None,
-            ),
+            )
+            or args.model_revision,
             "draft_revision": getattr(
                 draft_model.config,
                 "_commit_hash",
                 None,
-            ),
+            )
+            or args.draft_revision,
         }
         if args.draft_type == "dflash2":
             run_data["exact_token_match_count"] = sum(dflash2_matches)
@@ -362,9 +386,7 @@ def main() -> None:
         return run_data
 
     indices = list(range(dist.rank(), len(dataset), dist.size()))
-    pending_indices = [
-        idx for idx in indices if idx not in completed_dataset_indices
-    ]
+    pending_indices = [idx for idx in indices if idx not in completed_dataset_indices]
     progress = tqdm(
         pending_indices,
         disable=not dist.is_main(),
@@ -375,8 +397,7 @@ def main() -> None:
         instance = dataset[idx]
         shared_messages = []
         native_messages = {
-            method_key: []
-            for method_key in ("baseline", *methods_to_run)
+            method_key: [] for method_key in ("baseline", *methods_to_run)
         }
         instance_responses = []
         for turn_index, user_content in enumerate(instance["turns"]):
@@ -387,13 +408,8 @@ def main() -> None:
                     if args.native_method_trajectories
                     else shared_messages
                 )
-                if (
-                    args.native_method_trajectories
-                    or method_key == "baseline"
-                ):
-                    messages.append(
-                        {"role": "user", "content": user_content}
-                    )
+                if args.native_method_trajectories or method_key == "baseline":
+                    messages.append({"role": "user", "content": user_content})
                 input_text = tokenizer.apply_chat_template(
                     messages,
                     tokenize=False,
@@ -404,9 +420,7 @@ def main() -> None:
                     input_text,
                     return_tensors="pt",
                 ).to(target.device)
-                prompt_hash = hashlib.sha256(
-                    input_text.encode("utf-8")
-                ).hexdigest()
+                prompt_hash = hashlib.sha256(input_text.encode("utf-8")).hexdigest()
                 prompt_id = (
                     f"{args.dataset}:selected:{idx}:turn-{turn_index}:"
                     f"{method_key}:{prompt_hash[:12]}"
@@ -482,12 +496,9 @@ def main() -> None:
                         prompt_id=prompt_id,
                     )
                 comparable_to_baseline = (
-                    not args.native_method_trajectories
-                    or turn_index == 0
+                    not args.native_method_trajectories or turn_index == 0
                 )
-                if comparable_to_baseline and method_key.startswith(
-                    "dflash2"
-                ):
+                if comparable_to_baseline and method_key.startswith("dflash2"):
                     response[method_key].matches_baseline = torch.equal(
                         response["baseline"].output_ids,
                         response[method_key].output_ids,

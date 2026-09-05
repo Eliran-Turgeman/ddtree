@@ -1,8 +1,6 @@
-from types import SimpleNamespace
-
 import pytest
 
-import dflash2
+import generation_cache
 
 
 class FakeCache:
@@ -20,7 +18,11 @@ class FakeCache:
 def test_create_generation_cache_uses_config_and_records_past(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    created = SimpleNamespace(config=None, recording=False)
+    created = type(
+        "Created",
+        (),
+        {"config": None, "recording": False},
+    )()
 
     class StubDynamicCache:
         def __init__(self, *, config) -> None:
@@ -29,10 +31,14 @@ def test_create_generation_cache_uses_config_and_records_past(
         def activate_past_recording(self) -> None:
             created.recording = True
 
-    monkeypatch.setattr(dflash2, "DynamicCache", StubDynamicCache)
+    monkeypatch.setattr(
+        generation_cache,
+        "DynamicCache",
+        StubDynamicCache,
+    )
     config = object()
 
-    cache = dflash2.create_generation_cache(config)
+    cache = generation_cache.create_generation_cache(config)
 
     assert isinstance(cache, StubDynamicCache)
     assert created.config is config
@@ -50,7 +56,7 @@ def test_retain_cache_prefix_uses_negative_removal_count(
 ) -> None:
     cache = FakeCache(current_length)
 
-    dflash2.retain_cache_prefix(cache, retained_length)
+    generation_cache.retain_cache_prefix(cache, retained_length)
 
     assert cache.crop_calls == [expected_crop]
 
@@ -62,4 +68,4 @@ def test_retain_cache_prefix_rejects_invalid_length(
     cache = FakeCache(12)
 
     with pytest.raises(ValueError, match="retained cache length"):
-        dflash2.retain_cache_prefix(cache, retained_length)
+        generation_cache.retain_cache_prefix(cache, retained_length)

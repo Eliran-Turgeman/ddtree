@@ -6,14 +6,51 @@ This experiment tests whether Pairwise-K16 only beats Unary-K16 because the
 unary baseline is restricted to too few candidates.
 
 - Target: `Qwen/Qwen3-4B`
+- Target/tokenizer revision:
+  `1cfa9a7208912126459214e8b04321603b3df60c`
 - Drafter: `mgoin/Qwen3-4B-speculator.dflash2`
+- Drafter revision: `e3e7a18e4f541fa3841c2fb0666a7759079ab6fd`
 - GPU: one NVIDIA A100-SXM4 40GB
 - Temperature: 0
 - Verification-node budgets: 8, 16, 32, 64
 - Datasets: frozen GSM8K-128 and MATH500-128 subsets
 - Frozen benchmark implementation:
   `88774714e931f57d8cc974160352e2b8a587051b`
+- Frozen analysis implementation:
+  `95f0f30e7b6e2ff5e845e2c1062cb5bb034c01c1`
 - Bootstrap: 10,000 paired prompt-level resamples
+
+### Dataset subsets
+
+Both datasets use the test split, shuffled with Hugging Face Datasets
+`shuffle(seed=0)`, followed by `select(range(128))`. These are the same frozen
+GSM8K-128 and MATH500-128 subsets used in Steps 6.1 and 6.2.
+
+| Dataset | Repository/config/split | Revision | Selected-field SHA-256 |
+|---|---|---|---|
+| GSM8K | `openai/gsm8k`, `main`, `test` | `740312add88f781978c0658806c59bc2815b9866` | `3c91366d92f64bdf755e8d258f15e0c83f2aa57e15eee1899cadb7c0fff04aa0` |
+| MATH500 | `HuggingFaceH4/MATH-500`, `test` | `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be` | `09cd9c03cd241afad62401ef84a48e5e61ebc243a783aebfdd26721e7a273c05` |
+
+The hashes cover the selected problem text in order. The revisions and order
+were independently reconstructed after the run and verified by tokenizing
+all 128 prompts with the frozen tokenizer revision and matching every saved
+input-token prefix in the raw run artifacts.
+
+### Hardware and software
+
+| Component | Frozen value |
+|---|---|
+| GPU | NVIDIA A100-SXM4 40GB, one GPU |
+| Python | 3.10.12 |
+| PyTorch | 2.7.0 |
+| CUDA reported by PyTorch | 12.8 |
+| Transformers | 5.16.1 |
+| Attention implementation | SDPA |
+| Cache compaction | Existing C++ tail-cache extension enabled |
+| Maximum new tokens | 2048 |
+
+The raw artifacts record the implementation commit as clean (`dirty: false`)
+and contain these runtime and model-revision fields.
 
 Pairwise-K16 is unchanged from Step 6.2. Wider unary methods use the existing
 full-vocabulary unary logits from the same drafter forward pass. Unary-K32 and
@@ -217,6 +254,13 @@ All paired prompt-level throughput CIs exclude zero.
 - Candidate coverage on a shared state distribution is reported from
   Unary-K64 trajectories. Method-native coverage is also preserved in the
   detailed artifact.
+- Online methods commit different numbers and sometimes different token
+  sequences, so they visit different decoding states. Consequently, the
+  method-native candidate-failure and ranking/budget percentages are
+  descriptive and must not be interpreted as a perfectly causal frozen-state
+  decomposition. The common Unary-K64-trajectory coverage table isolates
+  candidate-width representability, while the acceptance comparison remains
+  the primary end-to-end result.
 
 ## Interpretation and recommendation
 
@@ -246,9 +290,11 @@ not the explanation for the original Pairwise gain:
 
 The supported claim is:
 
-> At equal verification-node budget, predecessor-conditioned Pairwise-K16
-> allocates verification capacity more effectively than unary top-K search;
-> simply widening unary support from 16 to 64 does not recover the gain.
+> Widening unary candidate support from K=16 to K=64 substantially improves
+> target-path representability but produces essentially no improvement in
+> fixed-budget acceptance. Pairwise-K16 continues to outperform Unary-K64,
+> supporting the hypothesis that predecessor-conditioned ranking—not
+> candidate breadth—is responsible for the observed gain.
 
 This claim is scoped to the frozen, unrenormalized full-vocabulary unary
 scores and the existing score-ordered best-first allocator at fixed node
@@ -319,6 +365,7 @@ Analysis and report:
 - `analyze_step63_wide_unary.py`
 - `analysis/2026-09-05_step63-wide-unary/`
 - `research_notes/dflash2_step63_wider_unary.md`
+- `analysis/2026-09-05_step63-wide-unary/artifact_manifest.sha256`
 
 Raw local artifacts:
 
@@ -331,3 +378,10 @@ Step 6.3 is frozen after this report. No scorer, normalization, candidate
 support, tree builder, checkpoint, budget, prompt subset, or analysis choice
 was tuned based on these results. HumanEval, MT-Bench, wider models, H100
 experiments, and further optimization were not started.
+
+The exact benchmark implementation is committed at
+`88774714e931f57d8cc974160352e2b8a587051b`; the exact analysis code that
+generated the final tables is committed at
+`95f0f30e7b6e2ff5e845e2c1062cb5bb034c01c1`. The SHA-256 manifest covers the
+implementation, analysis code, report, machine-readable tables, raw run
+artifacts, CSV exports, and logs.

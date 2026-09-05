@@ -13,6 +13,8 @@ from dflash2_tree import (
     annotate_candidate_diagnostics,
     build_dflash2_verifier_tree,
     proposal_to_lattice,
+    target_requires_sequential_tree_verification,
+    verify_target_selected_path,
 )
 from model.dflash2 import DFlash2Proposal
 from offline_dflash2_trees import (
@@ -71,18 +73,11 @@ def test_online_tree_matches_offline_frozen_trace(
 
         assert online_nodes == offline_nodes
         token_ids, depths, parents, child_maps, visibility = compiled
-        assert token_ids.tolist() == [
-            node.token_id for node in offline_nodes
-        ]
-        assert depths.tolist() == [
-            node.depth for node in offline_nodes
-        ]
+        assert token_ids.tolist() == [node.token_id for node in offline_nodes]
+        assert depths.tolist() == [node.depth for node in offline_nodes]
         assert parents == [
             -1,
-            *[
-                0 if node.parent == -1 else node.parent + 1
-                for node in offline_nodes
-            ],
+            *[0 if node.parent == -1 else node.parent + 1 for node in offline_nodes],
         ]
         expected_length = len(offline_nodes) + 1
         assert len(child_maps) == expected_length
@@ -97,27 +92,19 @@ def test_proposal_adapter_preserves_frozen_lattice() -> None:
     candidate_ids = trace_round["candidate_token_ids"].unsqueeze(0)
     unary_scores = trace_round["candidate_unary_logits"].unsqueeze(0)
     proposal = DFlash2Proposal(
-        token_ids=trace_round[
-            "selected_draft_token_ids"
-        ].unsqueeze(0),
-        selected_candidate_indices=trace_round[
-            "selected_candidate_indices"
-        ].unsqueeze(0),
+        token_ids=trace_round["selected_draft_token_ids"].unsqueeze(0),
+        selected_candidate_indices=trace_round["selected_candidate_indices"].unsqueeze(
+            0
+        ),
         candidate_ids=candidate_ids,
         unary_scores=unary_scores,
         unary_logsumexp=trace_round["unary_logsumexp"].unsqueeze(0),
         anchor_pairwise_corrections=trace_round[
             "anchor_pairwise_corrections"
         ].unsqueeze(0),
-        pairwise_corrections=trace_round[
-            "pairwise_corrections"
-        ].unsqueeze(0),
-        anchor_final_scores=trace_round[
-            "anchor_final_scores"
-        ].unsqueeze(0),
-        pairwise_final_scores=trace_round[
-            "pairwise_final_scores"
-        ].unsqueeze(0),
+        pairwise_corrections=trace_round["pairwise_corrections"].unsqueeze(0),
+        anchor_final_scores=trace_round["anchor_final_scores"].unsqueeze(0),
+        pairwise_final_scores=trace_round["pairwise_final_scores"].unsqueeze(0),
         corrected_scores=torch.empty(1, 7, 16),
     )
 
@@ -264,6 +251,72 @@ def test_candidate_diagnostics_classify_failures_and_censoring() -> None:
     assert metrics[2]["target_available_depth"] == 2
 
 
+def test_hybrid_target_uses_sequential_tree_verification() -> None:
+    target = type(
+        "Target",
+        (),
+        {
+            "config": type(
+                "Config",
+                (),
+                {
+                    "get_text_config": lambda self, decoder: type(
+                        "TextConfig",
+                        (),
+                        {"layer_types": ["linear_attention", "full_attention"]},
+                    )()
+                },
+            )()
+        },
+    )()
+
+    assert target_requires_sequential_tree_verification(target)
+
+
+def test_target_selected_path_follows_only_matching_children() -> None:
+    class FakeTarget:
+        def __init__(self) -> None:
+            self.predictions = iter([11, 31, 99])
+            self.calls: list[tuple[int, int]] = []
+
+        def __call__(
+            self,
+            input_ids: torch.Tensor,
+            *,
+            position_ids: torch.Tensor,
+            **kwargs,
+        ):
+            token_id = int(input_ids.item())
+            self.calls.append((token_id, int(position_ids.item())))
+            logits = torch.full((1, 1, 100), -1.0)
+            logits[0, 0, next(self.predictions)] = 1.0
+            hidden = torch.tensor([[[float(token_id)]]])
+            return type(
+                "Output",
+                (),
+                {
+                    "logits": logits,
+                    "hidden_states": (hidden, hidden),
+                },
+            )()
+
+    target = FakeTarget()
+    accepted_indices, next_token, hidden = verify_target_selected_path(
+        target=target,
+        past_key_values_target=object(),
+        root_token=torch.tensor([[5]]),
+        node_token_ids=torch.tensor([11, 22, 31]),
+        child_maps=[{11: 1}, {31: 3}, {}, {}],
+        start=20,
+        target_layer_ids=[0],
+    )
+
+    assert accepted_indices == [0, 1, 3]
+    assert next_token == 99
+    assert target.calls == [(5, 20), (11, 21), (31, 22)]
+    assert hidden.flatten().tolist() == [5.0, 11.0, 31.0]
+
+
 def test_lattice_shape_and_retained_mass_assertions() -> None:
     trace_round = frozen_rounds()[0]
     validate_lattice_tensors(
@@ -273,9 +326,7 @@ def test_lattice_shape_and_retained_mass_assertions() -> None:
     )
 
     malformed = dict(trace_round)
-    malformed["pairwise_final_scores"] = trace_round[
-        "pairwise_final_scores"
-    ][:-1]
+    malformed["pairwise_final_scores"] = trace_round["pairwise_final_scores"][:-1]
     with pytest.raises(ValueError, match="pairwise_final_scores"):
         validate_lattice_tensors(malformed)
 

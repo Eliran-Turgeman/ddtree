@@ -10,6 +10,7 @@ from ddtree import (
     follow_verified_tree,
 )
 from dflash import cuda_time, empty_stage_times
+from dflash2 import create_generation_cache, retain_cache_prefix
 from model import DFlash2DraftModel, extract_context_feature
 from model.dflash2 import DFlash2Proposal
 from offline_dflash2_trees import (
@@ -64,9 +65,7 @@ def proposal_to_lattice(
             + ", ".join(missing)
         )
     if proposal.candidate_ids.shape[0] != 1:
-        raise ValueError(
-            "online DFlash2 tree generation requires batch size 1"
-        )
+        raise ValueError("online DFlash2 tree generation requires batch size 1")
 
     if candidate_count < EXPECTED_CANDIDATE_COUNT:
         raise ValueError(
@@ -78,9 +77,7 @@ def proposal_to_lattice(
         unary_scores = proposal.unary_scores
     else:
         if proposal.full_unary_logits is None:
-            raise ValueError(
-                "DFlash2 proposal did not retain full unary logits"
-            )
+            raise ValueError("DFlash2 proposal did not retain full unary logits")
         if candidate_count > proposal.full_unary_logits.shape[-1]:
             raise ValueError(
                 f"candidate_count {candidate_count} exceeds vocabulary size "
@@ -142,9 +139,7 @@ def build_dflash2_verifier_tree(
         )
         depth, _ = validator(
             lattice,
-            expected_depth=(
-                EXPECTED_DRAFT_DEPTH if require_checkpoint_shape else None
-            ),
+            expected_depth=(EXPECTED_DRAFT_DEPTH if require_checkpoint_shape else None),
             expected_candidate_count=(
                 expected_candidate_count if require_checkpoint_shape else None
             ),
@@ -152,10 +147,7 @@ def build_dflash2_verifier_tree(
     else:
         depth = int(lattice["candidate_token_ids"].shape[0])
     scorer_name = {
-        **{
-            unary_method: UNARY_FULL_MASS
-            for unary_method in DFLASH2_UNARY_METHODS
-        },
+        **{unary_method: UNARY_FULL_MASS for unary_method in DFLASH2_UNARY_METHODS},
         DFLASH2_PAIRWISE_K16: PAIRWISE_MASS_PRESERVING,
     }.get(method)
     if scorer_name is None:
@@ -167,8 +159,7 @@ def build_dflash2_verifier_tree(
     maximum_extension = scorer.maximum_extension_log_score()
     if maximum_extension > 1e-5:
         raise ValueError(
-            "tree scorer has a positive extension log probability: "
-            f"{maximum_extension}"
+            f"tree scorer has a positive extension log probability: {maximum_extension}"
         )
     nodes = build_best_first_tree(
         lattice["candidate_token_ids"],
@@ -190,6 +181,60 @@ def _depth_counts(nodes: list[TreeNode], depth_limit: int) -> list[int]:
     return counts
 
 
+def target_requires_sequential_tree_verification(
+    target: AutoModelForCausalLM,
+) -> bool:
+    config = target.config.get_text_config(decoder=True)
+    return "linear_attention" in getattr(config, "layer_types", ())
+
+
+def verify_target_selected_path(
+    target: AutoModelForCausalLM,
+    past_key_values_target: DynamicCache,
+    root_token: torch.Tensor,
+    node_token_ids: torch.Tensor,
+    child_maps: list[dict[int, int]],
+    start: int,
+    target_layer_ids: list[int],
+) -> tuple[list[int], int, torch.Tensor]:
+    tree_token_ids = torch.cat(
+        [root_token.reshape(-1), node_token_ids.to(root_token.device)]
+    )
+    accepted_indices = [0]
+    selected_hidden_states = []
+    current_index = 0
+
+    while True:
+        output = target(
+            tree_token_ids[current_index].reshape(1, 1),
+            position_ids=torch.tensor(
+                [[start + len(accepted_indices) - 1]],
+                dtype=torch.long,
+                device=root_token.device,
+            ),
+            past_key_values=past_key_values_target,
+            use_cache=True,
+            logits_to_keep=1,
+            output_hidden_states=True,
+        )
+        selected_hidden_states.append(
+            extract_context_feature(
+                output.hidden_states,
+                target_layer_ids,
+            )
+        )
+        next_token = int(output.logits[0, -1].argmax().item())
+        child_index = child_maps[current_index].get(next_token)
+        if child_index is None:
+            return (
+                accepted_indices,
+                next_token,
+                torch.cat(selected_hidden_states, dim=1),
+            )
+        accepted_indices.append(child_index)
+        current_index = child_index
+
+
 def annotate_candidate_diagnostics(
     round_metrics: list[dict[str, object]],
     round_candidate_ids: list[torch.Tensor],
@@ -197,9 +242,7 @@ def annotate_candidate_diagnostics(
     generated_token_ids: torch.Tensor,
 ) -> None:
     if not (
-        len(round_metrics)
-        == len(round_candidate_ids)
-        == len(round_generation_starts)
+        len(round_metrics) == len(round_candidate_ids) == len(round_generation_starts)
     ):
         raise ValueError("candidate diagnostics are not round-aligned")
     generated_token_ids = generated_token_ids.long().cpu()
@@ -218,27 +261,19 @@ def annotate_candidate_diagnostics(
         for depth_index in range(EXPECTED_DRAFT_DEPTH):
             rank = None
             if depth_index < available_depth:
-                target_token_id = generated_token_ids[
-                    generation_start + depth_index
-                ]
-                matches = (
-                    candidate_ids[depth_index] == target_token_id
-                ).nonzero(as_tuple=True)[0]
+                target_token_id = generated_token_ids[generation_start + depth_index]
+                matches = (candidate_ids[depth_index] == target_token_id).nonzero(
+                    as_tuple=True
+                )[0]
                 if matches.numel():
                     rank = int(matches[0]) + 1
-                prefix_representable = (
-                    prefix_representable and rank is not None
-                )
+                prefix_representable = prefix_representable and rank is not None
             else:
                 prefix_representable = False
             ranks.append(rank)
             metric[f"target_rank_depth_{depth_index + 1}"] = rank
-            metric[
-                f"target_prefix_representable_depth_{depth_index + 1}"
-            ] = (
-                prefix_representable
-                if depth_index < available_depth
-                else None
+            metric[f"target_prefix_representable_depth_{depth_index + 1}"] = (
+                prefix_representable if depth_index < available_depth else None
             )
 
         matched = int(metric["matched_draft_tokens"])
@@ -332,8 +367,9 @@ def dflash2_tree_generate(
         device=target.device,
     )
 
-    past_key_values_target = DynamicCache()
-    past_key_values_draft = DynamicCache()
+    sequential_verifier = target_requires_sequential_tree_verification(target)
+    past_key_values_target = create_generation_cache(target.config)
+    past_key_values_draft = create_generation_cache(model.config)
     stage_times = empty_stage_times(DFLASH2_TREE_STAGE_ORDER)
 
     prefill_start = cuda_time()
@@ -351,7 +387,7 @@ def dflash2_tree_generate(
         output.hidden_states,
         model.target_layer_ids,
     )
-    past_key_values_target.crop(num_input_tokens)
+    retain_cache_prefix(past_key_values_target, num_input_tokens)
     time_to_first_token = cuda_time() - prefill_start
 
     decode_start = cuda_time()
@@ -367,9 +403,8 @@ def dflash2_tree_generate(
     previous_tree_start = 0
     previous_tree_length = 0
     draft_prefill = True
-    stopped = (
-        stop_tokens is not None
-        and bool(torch.isin(output_ids[:, start], stop_tokens).any())
+    stopped = stop_tokens is not None and bool(
+        torch.isin(output_ids[:, start], stop_tokens).any()
     )
 
     while start + 1 < max_length and not stopped:
@@ -393,7 +428,7 @@ def dflash2_tree_generate(
             past_key_values=past_key_values_draft,
             use_cache=True,
         )[:, 1 - model.block_size :, :]
-        past_key_values_draft.crop(start)
+        retain_cache_prefix(past_key_values_draft, start)
         proposal = model.propose(
             draft_hidden,
             root_token[:, 0],
@@ -415,9 +450,7 @@ def dflash2_tree_generate(
         candidate_select_latency = cuda_time() - candidate_select_start
         stage_times["candidate_select"] += candidate_select_latency
         tree_build_start = cuda_time()
-        candidate_ids_cpu = (
-            lattice["candidate_token_ids"].long().cpu()
-        )
+        candidate_ids_cpu = lattice["candidate_token_ids"].long().cpu()
         tree_lattice = {
             **lattice,
             "candidate_token_ids": candidate_ids_cpu,
@@ -439,49 +472,86 @@ def dflash2_tree_generate(
         stage_times["tree_build"] += tree_build_latency
 
         tree_compile_start = cuda_time()
-        (
-            verify_input_ids,
-            verify_position_ids,
-            verify_attention_mask,
-            previous_tree_start,
-            previous_tree_length,
-        ) = compile_ddtree_tree(
-            root_token_id=root_token[0, 0],
-            start=start,
-            node_token_ids=node_token_ids,
-            node_depths=node_depths,
-            visibility_cpu=visibility_cpu,
-            past_length=start,
-            dtype=target.dtype,
-            device=target.device,
-            verify_input_ids_buffer=verify_input_ids_buffer,
-            verify_position_ids_buffer=verify_position_ids_buffer,
-            attention_mask_buffer=attention_mask_buffer,
-            tree_visibility_buffer=tree_visibility_buffer,
-            previous_tree_start=previous_tree_start,
-            previous_tree_length=previous_tree_length,
-        )
+        if sequential_verifier:
+            verify_input_ids = torch.cat(
+                [
+                    root_token,
+                    node_token_ids.to(target.device).unsqueeze(0),
+                ],
+                dim=1,
+            )
+            verify_position_ids = None
+            verify_attention_mask = None
+        else:
+            (
+                verify_input_ids,
+                verify_position_ids,
+                verify_attention_mask,
+                previous_tree_start,
+                previous_tree_length,
+            ) = compile_ddtree_tree(
+                root_token_id=root_token[0, 0],
+                start=start,
+                node_token_ids=node_token_ids,
+                node_depths=node_depths,
+                visibility_cpu=visibility_cpu,
+                past_length=start,
+                dtype=target.dtype,
+                device=target.device,
+                verify_input_ids_buffer=verify_input_ids_buffer,
+                verify_position_ids_buffer=verify_position_ids_buffer,
+                attention_mask_buffer=attention_mask_buffer,
+                tree_visibility_buffer=tree_visibility_buffer,
+                previous_tree_start=previous_tree_start,
+                previous_tree_length=previous_tree_length,
+            )
         tree_compile_latency = cuda_time() - tree_compile_start
         stage_times["tree_compile"] += tree_compile_latency
 
         verify_start = cuda_time()
-        output = target(
-            verify_input_ids,
-            position_ids=verify_position_ids,
-            attention_mask=verify_attention_mask,
-            past_key_values=past_key_values_target,
-            use_cache=True,
-            output_hidden_states=True,
-        )
+        if sequential_verifier:
+            (
+                accepted_indices,
+                next_token,
+                accepted_target_hidden,
+            ) = verify_target_selected_path(
+                target=target,
+                past_key_values_target=past_key_values_target,
+                root_token=root_token,
+                node_token_ids=node_token_ids,
+                child_maps=child_maps,
+                start=start,
+                target_layer_ids=model.target_layer_ids,
+            )
+        else:
+            output = target(
+                verify_input_ids,
+                position_ids=verify_position_ids,
+                attention_mask=verify_attention_mask,
+                past_key_values=past_key_values_target,
+                use_cache=True,
+                output_hidden_states=True,
+            )
+            posterior = output.logits.argmax(dim=-1)
+            accepted_indices, next_token = follow_verified_tree(
+                child_maps,
+                posterior,
+            )
+            accepted_target_hidden = extract_context_feature(
+                output.hidden_states,
+                model.target_layer_ids,
+            ).index_select(
+                1,
+                torch.tensor(
+                    accepted_indices,
+                    dtype=torch.long,
+                    device=verify_input_ids.device,
+                ),
+            )
         verify_latency = cuda_time() - verify_start
         stage_times["verify"] += verify_latency
 
         commit_start = cuda_time()
-        posterior = output.logits.argmax(dim=-1)
-        accepted_indices, next_token = follow_verified_tree(
-            child_maps,
-            posterior,
-        )
         accepted_index_tensor = torch.tensor(
             accepted_indices,
             dtype=torch.long,
@@ -514,20 +584,19 @@ def dflash2_tree_generate(
         matched_draft_tokens = min(verifier_matched, produced)
         verifier_bonus_committed = produced > verifier_matched
         keep_indices = accepted_indices[:produced]
-        keep_index_tensor = torch.tensor(
-            keep_indices,
-            dtype=torch.long,
-            device=verify_input_ids.device,
-        )
-        compact_dynamic_cache(
-            past_key_values_target,
-            start,
-            keep_indices,
-        )
-        target_hidden = extract_context_feature(
-            output.hidden_states,
-            model.target_layer_ids,
-        ).index_select(1, keep_index_tensor)
+        if sequential_verifier:
+            retain_cache_prefix(
+                past_key_values_target,
+                start + produced,
+            )
+            target_hidden = accepted_target_hidden[:, :produced]
+        else:
+            compact_dynamic_cache(
+                past_key_values_target,
+                start,
+                keep_indices,
+            )
+            target_hidden = accepted_target_hidden[:, :produced]
         start += produced
         commit_latency = cuda_time() - commit_start
         stage_times["commit"] += commit_latency
@@ -539,6 +608,9 @@ def dflash2_tree_generate(
             "round_id": len(round_metrics),
             "tree_budget": tree_budget,
             "candidate_count": candidate_count,
+            "verifier_mode": (
+                "target_selected_path" if sequential_verifier else "packed_tree"
+            ),
             "tree_node_count": len(nodes),
             "tree_max_depth": max(
                 (node.depth for node in nodes),
@@ -552,9 +624,7 @@ def dflash2_tree_generate(
             "committed_tokens_this_round": produced,
             "verifier_bonus_committed": verifier_bonus_committed,
             "draft_latency_ms": draft_latency * 1000,
-            "candidate_select_latency_ms": (
-                candidate_select_latency * 1000
-            ),
+            "candidate_select_latency_ms": (candidate_select_latency * 1000),
             "tree_build_latency_ms": tree_build_latency * 1000,
             "tree_compile_latency_ms": tree_compile_latency * 1000,
             "target_verify_latency_ms": verify_latency * 1000,
@@ -568,9 +638,7 @@ def dflash2_tree_generate(
                     "candidate_index": node.candidate_index,
                     "depth": node.depth,
                     "parent": node.parent,
-                    "path_candidate_indices": (
-                        node.path_candidate_indices
-                    ),
+                    "path_candidate_indices": (node.path_candidate_indices),
                 }
                 for node in nodes
             ]
@@ -580,9 +648,7 @@ def dflash2_tree_generate(
         acceptance_lengths.append(produced)
         matched_draft_tokens_per_round.append(matched_draft_tokens)
         committed_tokens_per_round.append(produced)
-        verifier_bonus_committed_per_round.append(
-            verifier_bonus_committed
-        )
+        verifier_bonus_committed_per_round.append(verifier_bonus_committed)
         round_timestamps.append(cuda_time() - decode_start)
 
     total_decode_time = cuda_time() - decode_start
@@ -599,16 +665,12 @@ def dflash2_tree_generate(
         num_input_tokens=num_input_tokens,
         num_output_tokens=num_output_tokens,
         time_to_first_token=time_to_first_token,
-        time_per_output_token=(
-            total_decode_time / max(num_output_tokens, 1)
-        ),
+        time_per_output_token=(total_decode_time / max(num_output_tokens, 1)),
         acceptance_lengths=acceptance_lengths,
         matched_draft_tokens_per_round=matched_draft_tokens_per_round,
         accepted_draft_tokens_per_round=matched_draft_tokens_per_round,
         committed_tokens_per_round=committed_tokens_per_round,
-        verifier_bonus_committed_per_round=(
-            verifier_bonus_committed_per_round
-        ),
+        verifier_bonus_committed_per_round=(verifier_bonus_committed_per_round),
         decode_rounds=len(round_metrics),
         stage_times=stage_times,
         round_timestamps=round_timestamps,

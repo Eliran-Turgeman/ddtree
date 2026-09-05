@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from model.dflash2 import (
@@ -165,3 +166,75 @@ def test_checkpoint_config_adapter_preserves_dflash2_contract() -> None:
     assert config.rope_parameters["rope_theta"] == 1_000_000
     assert config.selector_top_k == 2
     assert config._commit_hash == "draft-checkpoint-sha"
+
+
+def test_official_checkpoint_config_adapter() -> None:
+    config = DFlash2DraftModel._convert_checkpoint_config(
+        {
+            "architectures": ["DFlash2DraftModel"],
+            "hidden_size": 5120,
+            "intermediate_size": 17408,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "num_hidden_layers": 5,
+            "head_dim": 128,
+            "vocab_size": 248320,
+            "layer_types": ["sliding_attention"] * 5,
+            "max_position_embeddings": 262144,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+                "rope_theta": 10_000_000,
+                "rope_type": "default",
+            },
+            "sliding_window": 2048,
+            "use_sliding_window": True,
+            "dflash_config": {
+                "block_size": 8,
+                "conv_group_size": 16,
+                "conv_kernel_size": 2,
+                "mask_token_id": 248070,
+                "selector_rank": 256,
+                "selector_top_k": 16,
+                "target_layer_ids": [5, 19, 33, 47, 61],
+            },
+            "_commit_hash": "official-draft-sha",
+        }
+    )
+
+    assert config.hidden_size == 5120
+    assert config.num_hidden_layers == 5
+    assert config.block_size == 8
+    assert config.conv_kernel_size == 2
+    assert config.conv_group_size == 16
+    assert config.selector_rank == 256
+    assert config.selector_top_k == 16
+    assert config.sample_from_anchor is False
+    assert config.dflash_config == {
+        "target_layer_ids": [5, 19, 33, 47, 61],
+        "mask_token_id": 248070,
+    }
+    assert config._commit_hash == "official-draft-sha"
+
+
+def test_official_checkpoint_config_requires_complete_dflash_config() -> None:
+    with pytest.raises(
+        ValueError,
+        match="dflash_config is missing: target_layer_ids",
+    ):
+        DFlash2DraftModel._convert_checkpoint_config(
+            {
+                "hidden_size": 8,
+                "num_attention_heads": 2,
+                "num_hidden_layers": 1,
+                "num_key_value_heads": 1,
+                "vocab_size": 32,
+                "dflash_config": {
+                    "block_size": 8,
+                    "conv_group_size": 4,
+                    "conv_kernel_size": 2,
+                    "mask_token_id": 31,
+                    "selector_rank": 4,
+                    "selector_top_k": 2,
+                },
+            }
+        )

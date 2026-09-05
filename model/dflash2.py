@@ -444,7 +444,46 @@ class DFlash2DraftModel(DFlashDraftModel):
 
     @staticmethod
     def _convert_checkpoint_config(config_dict: dict) -> Qwen3Config:
-        transformer_config = dict(config_dict["transformer_layer_config"])
+        if "transformer_layer_config" in config_dict:
+            transformer_config = dict(
+                config_dict["transformer_layer_config"]
+            )
+            dflash_config = {
+                "block_size": config_dict["block_size"],
+                "conv_group_size": config_dict["conv_group_size"],
+                "conv_kernel_size": config_dict["conv_kernel_size"],
+                "mask_token_id": config_dict["mask_token_id"],
+                "selector_rank": config_dict["selector_rank"],
+                "selector_top_k": config_dict["selector_top_k"],
+                "target_layer_ids": config_dict[
+                    "aux_hidden_state_layer_ids"
+                ],
+            }
+            sample_from_anchor = config_dict["sample_from_anchor"]
+        else:
+            transformer_config = dict(config_dict)
+            dflash_config = config_dict.get("dflash_config")
+            if not isinstance(dflash_config, dict):
+                raise ValueError(
+                    "DFlash2 checkpoint config must contain dflash_config"
+                )
+            required = {
+                "block_size",
+                "conv_group_size",
+                "conv_kernel_size",
+                "mask_token_id",
+                "selector_rank",
+                "selector_top_k",
+                "target_layer_ids",
+            }
+            missing = sorted(required - dflash_config.keys())
+            if missing:
+                raise ValueError(
+                    "DFlash2 checkpoint dflash_config is missing: "
+                    + ", ".join(missing)
+                )
+            sample_from_anchor = False
+
         rope_parameters = transformer_config.get("rope_parameters")
         if rope_parameters is not None:
             transformer_config.setdefault(
@@ -454,15 +493,15 @@ class DFlash2DraftModel(DFlashDraftModel):
         layer_config = Qwen3Config.from_dict(transformer_config)
         layer_config._commit_hash = config_dict.get("_commit_hash")
         layer_config.architectures = ["DFlash2DraftModel"]
-        layer_config.block_size = config_dict["block_size"]
-        layer_config.conv_kernel_size = config_dict["conv_kernel_size"]
-        layer_config.conv_group_size = config_dict["conv_group_size"]
-        layer_config.selector_rank = config_dict["selector_rank"]
-        layer_config.selector_top_k = config_dict["selector_top_k"]
-        layer_config.sample_from_anchor = config_dict["sample_from_anchor"]
+        layer_config.block_size = dflash_config["block_size"]
+        layer_config.conv_kernel_size = dflash_config["conv_kernel_size"]
+        layer_config.conv_group_size = dflash_config["conv_group_size"]
+        layer_config.selector_rank = dflash_config["selector_rank"]
+        layer_config.selector_top_k = dflash_config["selector_top_k"]
+        layer_config.sample_from_anchor = sample_from_anchor
         layer_config.dflash_config = {
-            "target_layer_ids": config_dict["aux_hidden_state_layer_ids"],
-            "mask_token_id": config_dict["mask_token_id"],
+            "target_layer_ids": dflash_config["target_layer_ids"],
+            "mask_token_id": dflash_config["mask_token_id"],
         }
         if rope_parameters is not None:
             configured_rope = getattr(

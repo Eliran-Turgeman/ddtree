@@ -52,6 +52,7 @@ class DFlash2Proposal:
     anchor_final_scores: torch.Tensor | None
     pairwise_final_scores: torch.Tensor | None
     corrected_scores: torch.Tensor
+    full_unary_logits: torch.Tensor | None = None
 
 
 def grouped_dynamic_conv(
@@ -434,6 +435,7 @@ class CandidateSelector(nn.Module):
             anchor_final_scores=anchor_final_scores,
             pairwise_final_scores=pairwise_final_scores,
             corrected_scores=torch.stack(corrected_scores, dim=1),
+            full_unary_logits=unary_logits if collect_lattice else None,
         )
 
 

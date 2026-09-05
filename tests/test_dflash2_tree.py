@@ -8,6 +8,9 @@ from ddtree import compile_generic_tree_for_verifier
 from dflash2_tree import (
     DFLASH2_PAIRWISE_K16,
     DFLASH2_UNARY_K16,
+    DFLASH2_UNARY_K32,
+    DFLASH2_UNARY_K64,
+    annotate_candidate_diagnostics,
     build_dflash2_verifier_tree,
     proposal_to_lattice,
 )
@@ -128,6 +131,137 @@ def test_proposal_adapter_preserves_frozen_lattice() -> None:
         "pairwise_final_scores",
     ):
         assert torch.equal(lattice[key], trace_round[key])
+
+
+def make_wide_proposal() -> tuple[DFlash2Proposal, torch.Tensor]:
+    full_unary_logits = torch.arange(
+        7 * 80,
+        dtype=torch.float32,
+    ).reshape(1, 7, 80)
+    unary_scores, candidate_ids = full_unary_logits.topk(16, dim=-1)
+    proposal = DFlash2Proposal(
+        token_ids=candidate_ids[:, :, 0],
+        selected_candidate_indices=torch.zeros(
+            1,
+            7,
+            dtype=torch.long,
+        ),
+        candidate_ids=candidate_ids,
+        unary_scores=unary_scores,
+        unary_logsumexp=torch.logsumexp(
+            full_unary_logits.float(),
+            dim=-1,
+        ),
+        anchor_pairwise_corrections=torch.empty(1, 16),
+        pairwise_corrections=torch.empty(1, 6, 16, 16),
+        anchor_final_scores=torch.zeros(1, 16),
+        pairwise_final_scores=torch.zeros(1, 6, 16, 16),
+        corrected_scores=torch.empty(1, 7, 16),
+        full_unary_logits=full_unary_logits,
+    )
+    return proposal, full_unary_logits
+
+
+def test_wide_unary_lattices_use_true_nested_top_k() -> None:
+    proposal, full_unary_logits = make_wide_proposal()
+    lattices = {
+        candidate_count: proposal_to_lattice(proposal, candidate_count)
+        for candidate_count in (16, 32, 64)
+    }
+
+    for candidate_count, lattice in lattices.items():
+        expected_scores, expected_ids = full_unary_logits.topk(
+            candidate_count,
+            dim=-1,
+        )
+        assert torch.equal(
+            lattice["candidate_token_ids"],
+            expected_ids[0],
+        )
+        assert torch.equal(
+            lattice["candidate_unary_logits"],
+            expected_scores[0],
+        )
+        assert torch.equal(
+            lattice["unary_logsumexp"],
+            proposal.unary_logsumexp[0],
+        )
+
+    assert torch.equal(
+        lattices[32]["candidate_token_ids"][:, :16],
+        lattices[16]["candidate_token_ids"],
+    )
+    assert torch.equal(
+        lattices[64]["candidate_token_ids"][:, :32],
+        lattices[32]["candidate_token_ids"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "candidate_count"),
+    [
+        (DFLASH2_UNARY_K16, 16),
+        (DFLASH2_UNARY_K32, 32),
+        (DFLASH2_UNARY_K64, 64),
+    ],
+)
+def test_wide_unary_budget_and_verifier_invariants(
+    method: str,
+    candidate_count: int,
+) -> None:
+    proposal, _ = make_wide_proposal()
+    lattice = proposal_to_lattice(proposal, candidate_count)
+
+    nodes, token_ids, depths, parents, child_maps, visibility = (
+        build_dflash2_verifier_tree(
+            lattice,
+            method,
+            budget=32,
+        )
+    )
+
+    assert len(nodes) == 32
+    assert token_ids.shape == (32,)
+    assert depths.shape == (32,)
+    assert parents[0] == -1
+    assert len(child_maps) == 33
+    assert visibility.shape == (33, 33)
+    for node_index, node in enumerate(nodes):
+        if node.parent != -1:
+            assert node.parent < node_index
+            assert nodes[node.parent].depth == node.depth - 1
+
+
+def test_candidate_diagnostics_classify_failures_and_censoring() -> None:
+    metrics = [
+        {"matched_draft_tokens": 1},
+        {"matched_draft_tokens": 0},
+        {"matched_draft_tokens": 2},
+    ]
+    candidate_ids = torch.tensor(
+        [
+            [10, 11],
+            [20, 21],
+            [30, 31],
+            [40, 41],
+            [50, 51],
+            [60, 61],
+            [70, 71],
+        ]
+    )
+    annotate_candidate_diagnostics(
+        metrics,
+        [candidate_ids, candidate_ids, candidate_ids],
+        [0, 2, 6],
+        torch.tensor([10, 21, 99, 40, 50, 60, 70, 10]),
+    )
+
+    assert metrics[0]["failure_type"] == "ranking_budget_failure"
+    assert metrics[0]["target_rank_depth_2"] == 2
+    assert metrics[1]["failure_type"] == "candidate_failure"
+    assert metrics[1]["target_rank_depth_1"] is None
+    assert metrics[2]["failure_type"] == "censored"
+    assert metrics[2]["target_available_depth"] == 2
 
 
 def test_lattice_shape_and_retained_mass_assertions() -> None:

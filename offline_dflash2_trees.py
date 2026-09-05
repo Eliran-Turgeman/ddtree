@@ -164,11 +164,46 @@ def validate_lattice_tensors(
     expected_candidate_count: int | None = None,
     probability_tolerance: float = 1e-5,
 ) -> tuple[int, int]:
+    depth, candidate_count = validate_unary_lattice_tensors(
+        lattice,
+        expected_depth=expected_depth,
+        expected_candidate_count=expected_candidate_count,
+        probability_tolerance=probability_tolerance,
+    )
+    anchor_final_scores = lattice["anchor_final_scores"]
+    pairwise_final_scores = lattice["pairwise_final_scores"]
+
+    expected_shapes = {
+        "anchor_final_scores": (candidate_count,),
+        "pairwise_final_scores": (
+            max(depth - 1, 0),
+            candidate_count,
+            candidate_count,
+        ),
+    }
+    tensors = {
+        "anchor_final_scores": anchor_final_scores,
+        "pairwise_final_scores": pairwise_final_scores,
+    }
+    for name, expected_shape in expected_shapes.items():
+        if tuple(tensors[name].shape) != expected_shape:
+            raise ValueError(
+                f"{name} must have shape {expected_shape}, "
+                f"got {tuple(tensors[name].shape)}"
+            )
+    return depth, candidate_count
+
+
+def validate_unary_lattice_tensors(
+    lattice: dict,
+    *,
+    expected_depth: int | None = None,
+    expected_candidate_count: int | None = None,
+    probability_tolerance: float = 1e-5,
+) -> tuple[int, int]:
     candidate_token_ids = lattice["candidate_token_ids"]
     unary_logits = lattice["candidate_unary_logits"]
     unary_logsumexp = lattice["unary_logsumexp"]
-    anchor_final_scores = lattice["anchor_final_scores"]
-    pairwise_final_scores = lattice["pairwise_final_scores"]
 
     if candidate_token_ids.ndim != 2:
         raise ValueError(
@@ -179,18 +214,10 @@ def validate_lattice_tensors(
     expected_shapes = {
         "candidate_unary_logits": (depth, candidate_count),
         "unary_logsumexp": (depth,),
-        "anchor_final_scores": (candidate_count,),
-        "pairwise_final_scores": (
-            max(depth - 1, 0),
-            candidate_count,
-            candidate_count,
-        ),
     }
     tensors = {
         "candidate_unary_logits": unary_logits,
         "unary_logsumexp": unary_logsumexp,
-        "anchor_final_scores": anchor_final_scores,
-        "pairwise_final_scores": pairwise_final_scores,
     }
     for name, expected_shape in expected_shapes.items():
         if tuple(tensors[name].shape) != expected_shape:
@@ -210,7 +237,6 @@ def validate_lattice_tensors(
             "candidate count must be "
             f"{expected_candidate_count}, got {candidate_count}"
         )
-
     log_retained_mass = (
         torch.logsumexp(unary_logits.float(), dim=-1)
         - unary_logsumexp.float()
@@ -230,7 +256,10 @@ def build_scorer(
     validate: bool = True,
 ) -> PrefixScorer:
     if validate:
-        validate_lattice_tensors(trace_round)
+        if name in (UNARY_FULL_MASS, UNARY_TRUNCATED):
+            validate_unary_lattice_tensors(trace_round)
+        else:
+            validate_lattice_tensors(trace_round)
     unary_logits = trace_round["candidate_unary_logits"].float()
     unary_logsumexp = trace_round["unary_logsumexp"].float()
     retained_logsumexp = torch.logsumexp(unary_logits, dim=-1)

@@ -19,17 +19,26 @@ from offline_dflash2_trees import (
     build_best_first_tree,
     build_scorer,
     validate_lattice_tensors,
+    validate_unary_lattice_tensors,
 )
 
 
 DFLASH2_UNARY_K16 = "dflash2_unary_k16"
+DFLASH2_UNARY_K32 = "dflash2_unary_k32"
+DFLASH2_UNARY_K64 = "dflash2_unary_k64"
 DFLASH2_PAIRWISE_K16 = "dflash2_pairwise_k16"
+DFLASH2_UNARY_METHODS = {
+    DFLASH2_UNARY_K16: 16,
+    DFLASH2_UNARY_K32: 32,
+    DFLASH2_UNARY_K64: 64,
+}
 DFLASH2_TREE_METHODS = (
-    DFLASH2_UNARY_K16,
+    *DFLASH2_UNARY_METHODS,
     DFLASH2_PAIRWISE_K16,
 )
 DFLASH2_TREE_STAGE_ORDER = (
     "draft",
+    "candidate_select",
     "tree_build",
     "tree_compile",
     "verify",
@@ -39,7 +48,10 @@ EXPECTED_DRAFT_DEPTH = 7
 EXPECTED_CANDIDATE_COUNT = 16
 
 
-def proposal_to_lattice(proposal: DFlash2Proposal) -> dict[str, torch.Tensor]:
+def proposal_to_lattice(
+    proposal: DFlash2Proposal,
+    candidate_count: int = EXPECTED_CANDIDATE_COUNT,
+) -> dict[str, torch.Tensor]:
     required = {
         "unary_logsumexp": proposal.unary_logsumexp,
         "anchor_final_scores": proposal.anchor_final_scores,
@@ -56,18 +68,48 @@ def proposal_to_lattice(proposal: DFlash2Proposal) -> dict[str, torch.Tensor]:
             "online DFlash2 tree generation requires batch size 1"
         )
 
+    if candidate_count < EXPECTED_CANDIDATE_COUNT:
+        raise ValueError(
+            "candidate_count cannot be smaller than the checkpoint "
+            f"selector width {EXPECTED_CANDIDATE_COUNT}"
+        )
+    if candidate_count == EXPECTED_CANDIDATE_COUNT:
+        candidate_ids = proposal.candidate_ids
+        unary_scores = proposal.unary_scores
+    else:
+        if proposal.full_unary_logits is None:
+            raise ValueError(
+                "DFlash2 proposal did not retain full unary logits"
+            )
+        if candidate_count > proposal.full_unary_logits.shape[-1]:
+            raise ValueError(
+                f"candidate_count {candidate_count} exceeds vocabulary size "
+                f"{proposal.full_unary_logits.shape[-1]}"
+            )
+        unary_scores, candidate_ids = proposal.full_unary_logits.topk(
+            candidate_count,
+            dim=-1,
+        )
+
     lattice = {
-        "candidate_token_ids": proposal.candidate_ids[0],
-        "candidate_unary_logits": proposal.unary_scores[0],
+        "candidate_token_ids": candidate_ids[0],
+        "candidate_unary_logits": unary_scores[0],
         "unary_logsumexp": proposal.unary_logsumexp[0],
         "anchor_final_scores": proposal.anchor_final_scores[0],
         "pairwise_final_scores": proposal.pairwise_final_scores[0],
     }
-    validate_lattice_tensors(
-        lattice,
-        expected_depth=EXPECTED_DRAFT_DEPTH,
-        expected_candidate_count=EXPECTED_CANDIDATE_COUNT,
-    )
+    if candidate_count == EXPECTED_CANDIDATE_COUNT:
+        validate_lattice_tensors(
+            lattice,
+            expected_depth=EXPECTED_DRAFT_DEPTH,
+            expected_candidate_count=EXPECTED_CANDIDATE_COUNT,
+        )
+    else:
+        validate_unary_lattice_tensors(
+            lattice,
+            expected_depth=EXPECTED_DRAFT_DEPTH,
+            expected_candidate_count=candidate_count,
+        )
     return lattice
 
 
@@ -86,22 +128,34 @@ def build_dflash2_verifier_tree(
     list[dict[int, int]],
     torch.Tensor,
 ]:
+    unary_candidate_count = DFLASH2_UNARY_METHODS.get(method)
+    expected_candidate_count = (
+        unary_candidate_count
+        if unary_candidate_count is not None
+        else EXPECTED_CANDIDATE_COUNT
+    )
     if validate_lattice:
-        depth, _ = validate_lattice_tensors(
+        validator = (
+            validate_unary_lattice_tensors
+            if unary_candidate_count is not None
+            else validate_lattice_tensors
+        )
+        depth, _ = validator(
             lattice,
             expected_depth=(
                 EXPECTED_DRAFT_DEPTH if require_checkpoint_shape else None
             ),
             expected_candidate_count=(
-                EXPECTED_CANDIDATE_COUNT
-                if require_checkpoint_shape
-                else None
+                expected_candidate_count if require_checkpoint_shape else None
             ),
         )
     else:
         depth = int(lattice["candidate_token_ids"].shape[0])
     scorer_name = {
-        DFLASH2_UNARY_K16: UNARY_FULL_MASS,
+        **{
+            unary_method: UNARY_FULL_MASS
+            for unary_method in DFLASH2_UNARY_METHODS
+        },
         DFLASH2_PAIRWISE_K16: PAIRWISE_MASS_PRESERVING,
     }.get(method)
     if scorer_name is None:
@@ -134,6 +188,72 @@ def _depth_counts(nodes: list[TreeNode], depth_limit: int) -> list[int]:
     for node in nodes:
         counts[node.depth - 1] += 1
     return counts
+
+
+def annotate_candidate_diagnostics(
+    round_metrics: list[dict[str, object]],
+    round_candidate_ids: list[torch.Tensor],
+    round_generation_starts: list[int],
+    generated_token_ids: torch.Tensor,
+) -> None:
+    if not (
+        len(round_metrics)
+        == len(round_candidate_ids)
+        == len(round_generation_starts)
+    ):
+        raise ValueError("candidate diagnostics are not round-aligned")
+    generated_token_ids = generated_token_ids.long().cpu()
+    for metric, candidate_ids, generation_start in zip(
+        round_metrics,
+        round_candidate_ids,
+        round_generation_starts,
+        strict=True,
+    ):
+        available_depth = min(
+            EXPECTED_DRAFT_DEPTH,
+            max(int(generated_token_ids.shape[0]) - generation_start, 0),
+        )
+        prefix_representable = True
+        ranks: list[int | None] = []
+        for depth_index in range(EXPECTED_DRAFT_DEPTH):
+            rank = None
+            if depth_index < available_depth:
+                target_token_id = generated_token_ids[
+                    generation_start + depth_index
+                ]
+                matches = (
+                    candidate_ids[depth_index] == target_token_id
+                ).nonzero(as_tuple=True)[0]
+                if matches.numel():
+                    rank = int(matches[0]) + 1
+                prefix_representable = (
+                    prefix_representable and rank is not None
+                )
+            else:
+                prefix_representable = False
+            ranks.append(rank)
+            metric[f"target_rank_depth_{depth_index + 1}"] = rank
+            metric[
+                f"target_prefix_representable_depth_{depth_index + 1}"
+            ] = (
+                prefix_representable
+                if depth_index < available_depth
+                else None
+            )
+
+        matched = int(metric["matched_draft_tokens"])
+        metric["target_available_depth"] = available_depth
+        if available_depth < EXPECTED_DRAFT_DEPTH and matched >= available_depth:
+            failure_type = "censored"
+        elif matched >= EXPECTED_DRAFT_DEPTH:
+            failure_type = "covered"
+        else:
+            failure_type = (
+                "ranking_budget_failure"
+                if ranks[matched] is not None
+                else "candidate_failure"
+            )
+        metric["failure_type"] = failure_type
 
 
 @torch.inference_mode()
@@ -237,6 +357,8 @@ def dflash2_tree_generate(
     decode_start = cuda_time()
     start = num_input_tokens
     round_metrics = []
+    round_candidate_ids = []
+    round_generation_starts = []
     acceptance_lengths = []
     matched_draft_tokens_per_round = []
     committed_tokens_per_round = []
@@ -252,6 +374,7 @@ def dflash2_tree_generate(
 
     while start + 1 < max_length and not stopped:
         round_start = cuda_time()
+        generation_start = start - num_input_tokens + 1
         root_token = output_ids[:, start : start + 1]
         block_output_ids = output_ids[
             :,
@@ -283,8 +406,22 @@ def dflash2_tree_generate(
         else:
             stage_times["draft"] += draft_latency
 
+        candidate_select_start = cuda_time()
+        candidate_count = DFLASH2_UNARY_METHODS.get(
+            tree_method,
+            EXPECTED_CANDIDATE_COUNT,
+        )
+        lattice = proposal_to_lattice(proposal, candidate_count)
+        candidate_select_latency = cuda_time() - candidate_select_start
+        stage_times["candidate_select"] += candidate_select_latency
         tree_build_start = cuda_time()
-        lattice = proposal_to_lattice(proposal)
+        candidate_ids_cpu = (
+            lattice["candidate_token_ids"].long().cpu()
+        )
+        tree_lattice = {
+            **lattice,
+            "candidate_token_ids": candidate_ids_cpu,
+        }
         (
             nodes,
             node_token_ids,
@@ -293,7 +430,7 @@ def dflash2_tree_generate(
             child_maps,
             visibility_cpu,
         ) = build_dflash2_verifier_tree(
-            lattice,
+            tree_lattice,
             tree_method,
             tree_budget,
             validate_lattice=False,
@@ -401,6 +538,7 @@ def dflash2_tree_generate(
             "prompt_id": prompt_id,
             "round_id": len(round_metrics),
             "tree_budget": tree_budget,
+            "candidate_count": candidate_count,
             "tree_node_count": len(nodes),
             "tree_max_depth": max(
                 (node.depth for node in nodes),
@@ -414,6 +552,9 @@ def dflash2_tree_generate(
             "committed_tokens_this_round": produced,
             "verifier_bonus_committed": verifier_bonus_committed,
             "draft_latency_ms": draft_latency * 1000,
+            "candidate_select_latency_ms": (
+                candidate_select_latency * 1000
+            ),
             "tree_build_latency_ms": tree_build_latency * 1000,
             "tree_compile_latency_ms": tree_compile_latency * 1000,
             "target_verify_latency_ms": verify_latency * 1000,
@@ -434,6 +575,8 @@ def dflash2_tree_generate(
                 for node in nodes
             ]
         round_metrics.append(metric)
+        round_candidate_ids.append(candidate_ids_cpu)
+        round_generation_starts.append(generation_start)
         acceptance_lengths.append(produced)
         matched_draft_tokens_per_round.append(matched_draft_tokens)
         committed_tokens_per_round.append(produced)
@@ -442,9 +585,15 @@ def dflash2_tree_generate(
         )
         round_timestamps.append(cuda_time() - decode_start)
 
+    total_decode_time = cuda_time() - decode_start
     output_ids = output_ids[:, : min(start + 1, max_length)]
     num_output_tokens = output_ids.shape[1] - num_input_tokens
-    total_decode_time = cuda_time() - decode_start
+    annotate_candidate_diagnostics(
+        round_metrics,
+        round_candidate_ids,
+        round_generation_starts,
+        output_ids[0, num_input_tokens:],
+    )
     return SimpleNamespace(
         output_ids=output_ids.cpu(),
         num_input_tokens=num_input_tokens,

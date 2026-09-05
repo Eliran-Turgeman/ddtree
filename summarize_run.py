@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import re
 from pathlib import Path
 from statistics import mean
 
@@ -43,8 +44,13 @@ def method_sort_key(method: str) -> tuple[int, int]:
         return (2, int(method.removeprefix("ddtree_tb")))
     if method == "dflash2":
         return (3, 0)
-    if method.startswith("dflash2_unary_k16_tb"):
-        return (4, int(method.rsplit("tb", maxsplit=1)[1]))
+    unary_match = re.match(r"^dflash2_unary_k(\d+)_tb(\d+)$", method)
+    if unary_match:
+        return (
+            4,
+            int(unary_match.group(1)) * 10000
+            + int(unary_match.group(2)),
+        )
     if method.startswith("dflash2_pairwise_k16_tb"):
         return (5, int(method.rsplit("tb", maxsplit=1)[1]))
     return (6, 0)

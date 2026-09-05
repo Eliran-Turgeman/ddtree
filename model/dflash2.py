@@ -55,6 +55,53 @@ class DFlash2Proposal:
     full_unary_logits: torch.Tensor | None = None
 
 
+def load_dflash2_draft_model(
+    pretrained_model_name_or_path: str,
+    *,
+    target: nn.Module,
+    **kwargs,
+) -> tuple["DFlash2DraftModel", dict]:
+    loaded = DFlash2DraftModel.from_pretrained(
+        pretrained_model_name_or_path,
+        output_loading_info=True,
+        **kwargs,
+    )
+    draft, loading_info = loaded
+    missing_keys = set(loading_info["missing_keys"])
+    shared_weight_keys = {
+        "embed_tokens.weight",
+        "lm_head.weight",
+    }
+    unexpected_missing = missing_keys - shared_weight_keys
+    if unexpected_missing:
+        raise ValueError(
+            "DFlash2 checkpoint is missing unsupported weights: "
+            + ", ".join(sorted(unexpected_missing))
+        )
+    if missing_keys:
+        if missing_keys != shared_weight_keys:
+            raise ValueError(
+                "DFlash2 checkpoint must either provide both token-weight "
+                "matrices or omit both for target sharing; missing: "
+                + ", ".join(sorted(missing_keys))
+            )
+        target_embeddings = target.get_input_embeddings()
+        target_lm_head = target.get_output_embeddings()
+        if target_embeddings is None or target_lm_head is None:
+            raise ValueError("target model does not expose input/output embeddings")
+        if (
+            draft.embed_tokens.weight.shape != target_embeddings.weight.shape
+            or draft.lm_head.weight.shape != target_lm_head.weight.shape
+        ):
+            raise ValueError("target and draft token-weight shapes are incompatible")
+        draft.embed_tokens = target_embeddings
+        draft.lm_head = target_lm_head
+        loading_info["shared_target_weight_keys"] = sorted(shared_weight_keys)
+    else:
+        loading_info["shared_target_weight_keys"] = []
+    return draft, loading_info
+
+
 def grouped_dynamic_conv(
     hidden_states: torch.Tensor,
     delta_kernel: torch.Tensor,
@@ -100,7 +147,9 @@ def grouped_dynamic_conv(
             padding = flat_hidden.new_zeros(tap, num_groups, group_size)
             shifted = torch.cat([padding, flat_hidden[:-tap]], dim=0)
         coefficient = (
-            base_kernel[tap].to(flat_hidden.dtype).view(
+            base_kernel[tap]
+            .to(flat_hidden.dtype)
+            .view(
                 1,
                 num_groups,
                 group_size,
@@ -262,9 +311,7 @@ class CandidateSelector(nn.Module):
     ) -> None:
         super().__init__()
         if top_k > vocab_size:
-            raise ValueError(
-                f"top_k ({top_k}) cannot exceed vocab_size ({vocab_size})"
-            )
+            raise ValueError(f"top_k ({top_k}) cannot exceed vocab_size ({vocab_size})")
         self.top_k = top_k
         self.predecessor_codebook = nn.Parameter(torch.empty(vocab_size, rank))
         self.successor_codebook = nn.Parameter(torch.empty(vocab_size, rank))
@@ -280,10 +327,7 @@ class CandidateSelector(nn.Module):
         projected_hidden = self.hidden_projection(hidden_states)
         context = predecessor * projected_hidden.to(predecessor.dtype).unsqueeze(-2)
         successors = self.successor_codebook[candidate_ids.long()]
-        return (
-            context.unsqueeze(-2)
-            * successors.unsqueeze(-3)
-        ).sum(dim=-1)
+        return (context.unsqueeze(-2) * successors.unsqueeze(-3)).sum(dim=-1)
 
     def score_candidate_components(
         self,
@@ -296,13 +340,9 @@ class CandidateSelector(nn.Module):
         projected_hidden = self.hidden_projection(hidden_states)
         context = predecessor * projected_hidden.to(predecessor.dtype)
         successors = self.successor_codebook[candidate_ids.long()]
-        transition_scores = (
-            context.unsqueeze(-2) * successors
-        ).sum(dim=-1)
+        transition_scores = (context.unsqueeze(-2) * successors).sum(dim=-1)
         unary_scores = unary_logits.gather(-1, candidate_ids)
-        final_scores = unary_scores + transition_scores.to(
-            unary_scores.dtype
-        )
+        final_scores = unary_scores + transition_scores.to(unary_scores.dtype)
         return unary_scores, transition_scores, final_scores
 
     def score_candidates(
@@ -336,13 +376,11 @@ class CandidateSelector(nn.Module):
         corrected_scores = []
 
         for position in range(hidden_states.shape[1]):
-            _, position_corrections, position_scores = (
-                self.score_candidate_components(
-                    unary_logits[:, position],
-                    hidden_states[:, position],
-                    predecessor_ids,
-                    candidate_ids[:, position],
-                )
+            _, position_corrections, position_scores = self.score_candidate_components(
+                unary_logits[:, position],
+                hidden_states[:, position],
+                predecessor_ids,
+                candidate_ids[:, position],
             )
             selected_predecessor_indices = position_scores.argmax(
                 dim=-1,
@@ -373,19 +411,22 @@ class CandidateSelector(nn.Module):
                     candidate_ids[:, position - 1],
                     candidate_ids[:, position],
                 )
-                selected_row_mask = torch.nn.functional.one_hot(
-                    selected_indices[position - 1],
-                    num_classes=self.top_k,
-                ).bool().unsqueeze(-1)
+                selected_row_mask = (
+                    torch.nn.functional.one_hot(
+                        selected_indices[position - 1],
+                        num_classes=self.top_k,
+                    )
+                    .bool()
+                    .unsqueeze(-1)
+                )
                 correction_matrix = torch.where(
                     selected_row_mask,
                     selected_corrections[position].unsqueeze(-2),
                     correction_matrix,
                 )
-                final_score_matrix = (
-                    unary_scores[:, position].unsqueeze(-2)
-                    + correction_matrix.to(unary_scores.dtype)
-                )
+                final_score_matrix = unary_scores[:, position].unsqueeze(
+                    -2
+                ) + correction_matrix.to(unary_scores.dtype)
                 final_score_matrix = torch.where(
                     selected_row_mask,
                     corrected_scores[position].unsqueeze(-2),
@@ -445,9 +486,7 @@ class DFlash2DraftModel(DFlashDraftModel):
     @staticmethod
     def _convert_checkpoint_config(config_dict: dict) -> Qwen3Config:
         if "transformer_layer_config" in config_dict:
-            transformer_config = dict(
-                config_dict["transformer_layer_config"]
-            )
+            transformer_config = dict(config_dict["transformer_layer_config"])
             dflash_config = {
                 "block_size": config_dict["block_size"],
                 "conv_group_size": config_dict["conv_group_size"],
@@ -455,18 +494,14 @@ class DFlash2DraftModel(DFlashDraftModel):
                 "mask_token_id": config_dict["mask_token_id"],
                 "selector_rank": config_dict["selector_rank"],
                 "selector_top_k": config_dict["selector_top_k"],
-                "target_layer_ids": config_dict[
-                    "aux_hidden_state_layer_ids"
-                ],
+                "target_layer_ids": config_dict["aux_hidden_state_layer_ids"],
             }
             sample_from_anchor = config_dict["sample_from_anchor"]
         else:
             transformer_config = dict(config_dict)
             dflash_config = config_dict.get("dflash_config")
             if not isinstance(dflash_config, dict):
-                raise ValueError(
-                    "DFlash2 checkpoint config must contain dflash_config"
-                )
+                raise ValueError("DFlash2 checkpoint config must contain dflash_config")
             required = {
                 "block_size",
                 "conv_group_size",
@@ -479,8 +514,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             missing = sorted(required - dflash_config.keys())
             if missing:
                 raise ValueError(
-                    "DFlash2 checkpoint dflash_config is missing: "
-                    + ", ".join(missing)
+                    "DFlash2 checkpoint dflash_config is missing: " + ", ".join(missing)
                 )
             sample_from_anchor = False
 

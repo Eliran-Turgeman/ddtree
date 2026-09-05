@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM
 
-from model import DFlash2DraftModel
+from model import load_dflash2_draft_model
 
 
 EXPECTED_TARGET_LAYERS = [5, 19, 33, 47, 61]
@@ -45,12 +45,8 @@ def memory_snapshot() -> dict[str, float]:
     return {
         "allocated_gib": gibibytes(torch.cuda.memory_allocated()),
         "reserved_gib": gibibytes(torch.cuda.memory_reserved()),
-        "peak_allocated_gib": gibibytes(
-            torch.cuda.max_memory_allocated()
-        ),
-        "peak_reserved_gib": gibibytes(
-            torch.cuda.max_memory_reserved()
-        ),
+        "peak_allocated_gib": gibibytes(torch.cuda.max_memory_allocated()),
+        "peak_reserved_gib": gibibytes(torch.cuda.max_memory_reserved()),
     }
 
 
@@ -68,23 +64,29 @@ def main() -> None:
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
-    target = AutoModelForCausalLM.from_pretrained(
-        args.target,
-        revision=args.target_revision,
-        attn_implementation="sdpa",
-        dtype=torch.bfloat16,
-    ).to(device).eval()
+    target = (
+        AutoModelForCausalLM.from_pretrained(
+            args.target,
+            revision=args.target_revision,
+            attn_implementation="sdpa",
+            dtype=torch.bfloat16,
+        )
+        .to(device)
+        .eval()
+    )
     torch.cuda.synchronize()
     target_memory = memory_snapshot()
     target_config = target.config.get_text_config(decoder=True)
 
     torch.cuda.reset_peak_memory_stats()
-    draft = DFlash2DraftModel.from_pretrained(
+    draft, loading_info = load_dflash2_draft_model(
         args.draft,
+        target=target,
         revision=args.draft_revision,
         attn_implementation="sdpa",
         dtype=torch.bfloat16,
-    ).to(device).eval()
+    )
+    draft = draft.to(device).eval()
     torch.cuda.synchronize()
     pair_memory = memory_snapshot()
 
@@ -134,21 +136,18 @@ def main() -> None:
         "target_revision": getattr(
             target.config,
             "_commit_hash",
-            args.target_revision,
-        ),
+            None,
+        )
+        or args.target_revision,
         "target_class": type(target).__name__,
         "target_parameters": parameter_count(target),
         "target_config": {
             "vocab_size": target_config.vocab_size,
             "hidden_size": target_config.hidden_size,
             "num_hidden_layers": target_config.num_hidden_layers,
-            "linear_attention_layers": layer_types.count(
-                "linear_attention"
-            ),
+            "linear_attention_layers": layer_types.count("linear_attention"),
             "full_attention_layers": layer_types.count("full_attention"),
-            "max_position_embeddings": (
-                target_config.max_position_embeddings
-            ),
+            "max_position_embeddings": (target_config.max_position_embeddings),
             "dtype": str(target.dtype),
         },
         "memory_after_target_load": target_memory,
@@ -156,10 +155,12 @@ def main() -> None:
         "draft_revision": getattr(
             draft.config,
             "_commit_hash",
-            args.draft_revision,
-        ),
+            None,
+        )
+        or args.draft_revision,
         "draft_class": type(draft).__name__,
         "draft_parameters": parameter_count(draft),
+        "draft_shared_target_weight_keys": loading_info["shared_target_weight_keys"],
         "draft_config": actual_draft,
         "memory_after_draft_load": pair_memory,
         "runtime": {

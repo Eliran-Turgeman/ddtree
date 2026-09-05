@@ -5,6 +5,7 @@ from model.dflash2 import (
     CandidateSelector,
     DFlash2DraftModel,
     GroupedDynamicCausalConv,
+    load_dflash2_draft_model,
 )
 
 
@@ -68,17 +69,13 @@ def test_candidate_selector_exposes_raw_pairwise_corrections() -> None:
         top_k=2,
     )
     with torch.no_grad():
-        selector.predecessor_codebook.copy_(
-            torch.tensor([[2.0], [3.0], [5.0], [7.0]])
-        )
+        selector.predecessor_codebook.copy_(torch.tensor([[2.0], [3.0], [5.0], [7.0]]))
         selector.successor_codebook.copy_(
             torch.tensor([[11.0], [13.0], [17.0], [19.0]])
         )
         selector.hidden_projection.weight.fill_(1.0)
 
-    unary_logits = torch.tensor(
-        [[[0.0, 5.0, 4.0, 1.0], [3.0, 1.0, 2.0, 6.0]]]
-    )
+    unary_logits = torch.tensor([[[0.0, 5.0, 4.0, 1.0], [3.0, 1.0, 2.0, 6.0]]])
     hidden_states = torch.tensor([[[7.0], [11.0]]])
     normal_proposal = selector.select_path(
         unary_logits,
@@ -238,3 +235,115 @@ def test_official_checkpoint_config_requires_complete_dflash_config() -> None:
                 },
             }
         )
+
+
+def test_official_checkpoint_shares_omitted_target_token_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "embed_tokens": torch.nn.Embedding(32, 8),
+            "lm_head": torch.nn.Linear(8, 32, bias=False),
+        },
+    )()
+    target_embeddings = torch.nn.Embedding(32, 8)
+    target_lm_head = torch.nn.Linear(8, 32, bias=False)
+    target = type(
+        "Target",
+        (),
+        {
+            "get_input_embeddings": lambda self: target_embeddings,
+            "get_output_embeddings": lambda self: target_lm_head,
+        },
+    )()
+    monkeypatch.setattr(
+        DFlash2DraftModel,
+        "from_pretrained",
+        lambda *args, **kwargs: (
+            draft,
+            {
+                "missing_keys": [
+                    "embed_tokens.weight",
+                    "lm_head.weight",
+                ]
+            },
+        ),
+    )
+
+    loaded, loading_info = load_dflash2_draft_model(
+        "official-draft",
+        target=target,
+    )
+
+    assert loaded.embed_tokens is target_embeddings
+    assert loaded.lm_head is target_lm_head
+    assert loading_info["shared_target_weight_keys"] == [
+        "embed_tokens.weight",
+        "lm_head.weight",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("missing_keys", "message"),
+    [
+        (
+            ["embed_tokens.weight"],
+            "must either provide both token-weight matrices or omit both",
+        ),
+        (
+            ["embed_tokens.weight", "lm_head.weight", "layers.0.weight"],
+            "missing unsupported weights: layers.0.weight",
+        ),
+    ],
+)
+def test_official_checkpoint_rejects_invalid_missing_weights(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_keys: list[str],
+    message: str,
+) -> None:
+    draft = type("Draft", (), {})()
+    monkeypatch.setattr(
+        DFlash2DraftModel,
+        "from_pretrained",
+        lambda *args, **kwargs: (
+            draft,
+            {"missing_keys": missing_keys},
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_dflash2_draft_model(
+            "official-draft",
+            target=object(),
+        )
+
+
+def test_checkpoint_owned_token_weights_are_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draft = type(
+        "Draft",
+        (),
+        {
+            "embed_tokens": torch.nn.Embedding(32, 8),
+            "lm_head": torch.nn.Linear(8, 32, bias=False),
+        },
+    )()
+    original_embeddings = draft.embed_tokens
+    original_lm_head = draft.lm_head
+    monkeypatch.setattr(
+        DFlash2DraftModel,
+        "from_pretrained",
+        lambda *args, **kwargs: (draft, {"missing_keys": []}),
+    )
+
+    loaded, loading_info = load_dflash2_draft_model(
+        "self-contained-draft",
+        target=object(),
+    )
+
+    assert loaded.embed_tokens is original_embeddings
+    assert loaded.lm_head is original_lm_head
+    assert loading_info["shared_target_weight_keys"] == []

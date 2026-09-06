@@ -168,6 +168,12 @@ def dflash2_generate(
                 or proposal.pairwise_final_scores is None
             ):
                 raise RuntimeError("DFlash2 lattice tensors were not collected")
+            if proposal.full_unary_logits is None:
+                raise ValueError("trace collection requires full DFlash2 unary logits")
+            trace_unary_logits, trace_token_ids = proposal.full_unary_logits.topk(
+                min(64, proposal.full_unary_logits.shape[-1]),
+                dim=-1,
+            )
             draft_length = proposal.token_ids.shape[1]
             directly_observed_count = min(
                 acceptance_length + 1,
@@ -203,6 +209,11 @@ def dflash2_generate(
                     .cpu()
                     .to(torch.int32),
                     "candidate_unary_logits": proposal.unary_scores[0].detach().cpu(),
+                    "unary_top64_token_ids": trace_token_ids[0]
+                    .detach()
+                    .cpu()
+                    .to(torch.int32),
+                    "unary_top64_logits": trace_unary_logits[0].detach().cpu(),
                     "unary_logsumexp": proposal.unary_logsumexp[0].detach().cpu(),
                     "anchor_pairwise_corrections": (
                         proposal.anchor_pairwise_corrections[0].detach().cpu()

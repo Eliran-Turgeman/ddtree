@@ -28,6 +28,40 @@ from dflash2_tree import (
 from ddtree import ddtree_generate, maybe_enable_cpp_compact
 
 
+def parse_dflash2_tree_configs(
+    value: str,
+    allowed_methods: tuple[str, ...] = DFLASH2_TREE_METHODS,
+) -> list[tuple[str, int]]:
+    configs = []
+    seen = set()
+    for entry in value.split(";"):
+        if not entry:
+            continue
+        try:
+            method, budgets_text = entry.split(":", maxsplit=1)
+        except ValueError as exc:
+            raise ValueError(
+                "DFlash2 tree configs must use METHOD:BUDGET[,BUDGET];..."
+            ) from exc
+        if method not in allowed_methods:
+            raise ValueError(f"unsupported DFlash2 tree method: {method}")
+        for budget_text in budgets_text.split(","):
+            try:
+                budget = int(budget_text)
+            except ValueError as exc:
+                raise ValueError(f"invalid tree budget: {budget_text}") from exc
+            if budget <= 0:
+                raise ValueError("tree budgets must be positive")
+            config = (method, budget)
+            if config in seen:
+                raise ValueError(f"duplicate DFlash2 tree config: {method}:{budget}")
+            seen.add(config)
+            configs.append(config)
+    if not configs:
+        raise ValueError("at least one DFlash2 tree config is required")
+    return configs
+
+
 def repository_metadata() -> dict[str, object]:
     try:
         commit = subprocess.run(
@@ -85,6 +119,19 @@ def main() -> None:
         default=",".join(DFLASH2_TREE_METHODS),
     )
     parser.add_argument(
+        "--dflash2-tree-configs",
+        help=(
+            "Explicit METHOD:BUDGET[,BUDGET];... matrix. When set, this "
+            "replaces the cross-product of --dflash2-tree-methods and "
+            "--tree-budget."
+        ),
+    )
+    parser.add_argument(
+        "--collect-allocation-data",
+        action="store_true",
+        help="Persist DFlash2 proposal lattices and selected tree nodes.",
+    )
+    parser.add_argument(
         "--native-method-trajectories",
         action="store_true",
         help=(
@@ -108,8 +155,17 @@ def main() -> None:
             parser.error(
                 "unsupported DFlash2 tree methods: " + ", ".join(invalid_tree_methods)
             )
+        try:
+            requested_tree_configs = (
+                parse_dflash2_tree_configs(args.dflash2_tree_configs)
+                if args.dflash2_tree_configs
+                else None
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     else:
         requested_tree_methods = []
+        requested_tree_configs = None
 
     random.seed(0)
     np.random.seed(0)
@@ -203,12 +259,16 @@ def main() -> None:
             {f"ddtree_tb{tree_budget}": tree_budget for tree_budget in tree_budgets}
         )
     elif args.draft_type == "dflash2":
-        for tree_method in requested_tree_methods:
-            for tree_budget in tree_budgets:
-                method_key = f"{tree_method}_tb{tree_budget}"
-                methods_to_run.append(method_key)
-                method_key_to_tree_budget[method_key] = tree_budget
-                method_key_to_tree_method[method_key] = tree_method
+        tree_configs = requested_tree_configs or [
+            (tree_method, tree_budget)
+            for tree_method in requested_tree_methods
+            for tree_budget in tree_budgets
+        ]
+        for tree_method, tree_budget in tree_configs:
+            method_key = f"{tree_method}_tb{tree_budget}"
+            methods_to_run.append(method_key)
+            method_key_to_tree_budget[method_key] = tree_budget
+            method_key_to_tree_method[method_key] = tree_method
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
@@ -271,6 +331,7 @@ def main() -> None:
                 input_ids=warmup_input_ids,
                 max_new_tokens=warmup_max_new_tokens,
                 stop_token_ids=[tokenizer.eos_token_id],
+                collect_traces=args.collect_allocation_data,
             )
         else:
             _ = dflash2_tree_generate(
@@ -281,6 +342,7 @@ def main() -> None:
                 stop_token_ids=[tokenizer.eos_token_id],
                 tree_budget=method_key_to_tree_budget[method_key],
                 tree_method=method_key_to_tree_method[method_key],
+                collect_tree_data=args.collect_allocation_data,
             )
 
     save_path = Path(args.save_path) if args.save_path is not None else None
@@ -483,6 +545,7 @@ def main() -> None:
                         max_new_tokens=args.max_new_tokens,
                         stop_token_ids=[tokenizer.eos_token_id],
                         prompt_id=prompt_id,
+                        collect_traces=args.collect_allocation_data,
                     )
                 else:
                     response[method_key] = dflash2_tree_generate(
@@ -494,6 +557,7 @@ def main() -> None:
                         tree_budget=method_key_to_tree_budget[method_key],
                         tree_method=method_key_to_tree_method[method_key],
                         prompt_id=prompt_id,
+                        collect_tree_data=args.collect_allocation_data,
                     )
                 comparable_to_baseline = (
                     not args.native_method_trajectories or turn_index == 0

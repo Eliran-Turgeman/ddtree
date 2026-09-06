@@ -27,6 +27,7 @@ from offline_dflash2_trees import (
 DFLASH2_UNARY_K16 = "dflash2_unary_k16"
 DFLASH2_UNARY_K32 = "dflash2_unary_k32"
 DFLASH2_UNARY_K64 = "dflash2_unary_k64"
+DFLASH2_ORIGINAL_DDTREE = "dflash2_original_ddtree"
 DFLASH2_PAIRWISE_K16 = "dflash2_pairwise_k16"
 DFLASH2_UNARY_METHODS = {
     DFLASH2_UNARY_K16: 16,
@@ -35,6 +36,7 @@ DFLASH2_UNARY_METHODS = {
 }
 DFLASH2_TREE_METHODS = (
     *DFLASH2_UNARY_METHODS,
+    DFLASH2_ORIGINAL_DDTREE,
     DFLASH2_PAIRWISE_K16,
 )
 DFLASH2_TREE_STAGE_ORDER = (
@@ -67,11 +69,8 @@ def proposal_to_lattice(
     if proposal.candidate_ids.shape[0] != 1:
         raise ValueError("online DFlash2 tree generation requires batch size 1")
 
-    if candidate_count < EXPECTED_CANDIDATE_COUNT:
-        raise ValueError(
-            "candidate_count cannot be smaller than the checkpoint "
-            f"selector width {EXPECTED_CANDIDATE_COUNT}"
-        )
+    if candidate_count <= 0:
+        raise ValueError("candidate_count must be positive")
     if candidate_count == EXPECTED_CANDIDATE_COUNT:
         candidate_ids = proposal.candidate_ids
         unary_scores = proposal.unary_scores
@@ -110,6 +109,18 @@ def proposal_to_lattice(
     return lattice
 
 
+def candidate_count_for_method(
+    proposal: DFlash2Proposal,
+    method: str,
+    budget: int,
+) -> int:
+    if method == DFLASH2_ORIGINAL_DDTREE:
+        if proposal.full_unary_logits is None:
+            raise ValueError("DFlash2 proposal did not retain full unary logits")
+        return min(budget, int(proposal.full_unary_logits.shape[-1]))
+    return DFLASH2_UNARY_METHODS.get(method, EXPECTED_CANDIDATE_COUNT)
+
+
 def build_dflash2_verifier_tree(
     lattice: dict[str, torch.Tensor],
     method: str,
@@ -126,15 +137,22 @@ def build_dflash2_verifier_tree(
     torch.Tensor,
 ]:
     unary_candidate_count = DFLASH2_UNARY_METHODS.get(method)
+    is_unary_method = (
+        unary_candidate_count is not None or method == DFLASH2_ORIGINAL_DDTREE
+    )
     expected_candidate_count = (
         unary_candidate_count
         if unary_candidate_count is not None
-        else EXPECTED_CANDIDATE_COUNT
+        else (
+            int(lattice["candidate_token_ids"].shape[1])
+            if method == DFLASH2_ORIGINAL_DDTREE
+            else EXPECTED_CANDIDATE_COUNT
+        )
     )
     if validate_lattice:
         validator = (
             validate_unary_lattice_tensors
-            if unary_candidate_count is not None
+            if is_unary_method
             else validate_lattice_tensors
         )
         depth, _ = validator(
@@ -148,6 +166,7 @@ def build_dflash2_verifier_tree(
         depth = int(lattice["candidate_token_ids"].shape[0])
     scorer_name = {
         **{unary_method: UNARY_FULL_MASS for unary_method in DFLASH2_UNARY_METHODS},
+        DFLASH2_ORIGINAL_DDTREE: UNARY_FULL_MASS,
         DFLASH2_PAIRWISE_K16: PAIRWISE_MASS_PRESERVING,
     }.get(method)
     if scorer_name is None:
@@ -442,9 +461,10 @@ def dflash2_tree_generate(
             stage_times["draft"] += draft_latency
 
         candidate_select_start = cuda_time()
-        candidate_count = DFLASH2_UNARY_METHODS.get(
+        candidate_count = candidate_count_for_method(
+            proposal,
             tree_method,
-            EXPECTED_CANDIDATE_COUNT,
+            tree_budget,
         )
         lattice = proposal_to_lattice(proposal, candidate_count)
         candidate_select_latency = cuda_time() - candidate_select_start
@@ -642,6 +662,27 @@ def dflash2_tree_generate(
                 }
                 for node in nodes
             ]
+            metric["allocation_lattice"] = {
+                "candidate_token_ids": lattice["candidate_token_ids"]
+                .detach()
+                .cpu()
+                .to(torch.int32),
+                "candidate_unary_logits": lattice["candidate_unary_logits"]
+                .detach()
+                .cpu(),
+                "unary_logsumexp": lattice["unary_logsumexp"].detach().cpu(),
+            }
+            if tree_method == DFLASH2_PAIRWISE_K16:
+                metric["allocation_lattice"].update(
+                    {
+                        "anchor_final_scores": lattice["anchor_final_scores"]
+                        .detach()
+                        .cpu(),
+                        "pairwise_final_scores": lattice["pairwise_final_scores"]
+                        .detach()
+                        .cpu(),
+                    }
+                )
         round_metrics.append(metric)
         round_candidate_ids.append(candidate_ids_cpu)
         round_generation_starts.append(generation_start)

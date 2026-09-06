@@ -4,14 +4,17 @@ from pathlib import Path
 import pytest
 import torch
 
-from ddtree import compile_generic_tree_for_verifier
+import ddtree
+from ddtree import build_ddtree_tree, compile_generic_tree_for_verifier
 from dflash2_tree import (
+    DFLASH2_ORIGINAL_DDTREE,
     DFLASH2_PAIRWISE_K16,
     DFLASH2_UNARY_K16,
     DFLASH2_UNARY_K32,
     DFLASH2_UNARY_K64,
     annotate_candidate_diagnostics,
     build_dflash2_verifier_tree,
+    candidate_count_for_method,
     proposal_to_lattice,
     target_requires_sequential_tree_verification,
     verify_target_selected_path,
@@ -153,7 +156,7 @@ def test_wide_unary_lattices_use_true_nested_top_k() -> None:
     proposal, full_unary_logits = make_wide_proposal()
     lattices = {
         candidate_count: proposal_to_lattice(proposal, candidate_count)
-        for candidate_count in (16, 32, 64)
+        for candidate_count in (7, 16, 32, 64)
     }
 
     for candidate_count, lattice in lattices.items():
@@ -174,6 +177,10 @@ def test_wide_unary_lattices_use_true_nested_top_k() -> None:
             proposal.unary_logsumexp[0],
         )
 
+    assert torch.equal(
+        lattices[16]["candidate_token_ids"][:, :7],
+        lattices[7]["candidate_token_ids"],
+    )
     assert torch.equal(
         lattices[32]["candidate_token_ids"][:, :16],
         lattices[16]["candidate_token_ids"],
@@ -217,6 +224,59 @@ def test_wide_unary_budget_and_verifier_invariants(
         if node.parent != -1:
             assert node.parent < node_index
             assert nodes[node.parent].depth == node.depth - 1
+
+
+@pytest.mark.parametrize("budget", [7, 16, 32, 64])
+def test_original_ddtree_method_matches_released_builder(
+    budget: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ddtree, "cuda_time", lambda: 0.0)
+    proposal, full_unary_logits = make_wide_proposal()
+    candidate_count = candidate_count_for_method(
+        proposal,
+        DFLASH2_ORIGINAL_DDTREE,
+        budget,
+    )
+    lattice = proposal_to_lattice(proposal, candidate_count)
+    nodes, *compiled = build_dflash2_verifier_tree(
+        lattice,
+        DFLASH2_ORIGINAL_DDTREE,
+        budget,
+    )
+    released = build_ddtree_tree(full_unary_logits[0], budget)
+
+    token_ids, depths, parents, child_maps, visibility = compiled
+    (
+        released_token_ids,
+        released_depths,
+        released_parents,
+        released_child_maps,
+        released_visibility,
+        _,
+    ) = released
+    assert candidate_count == budget
+    assert token_ids.tolist() == released_token_ids.tolist()
+    assert depths.tolist() == released_depths.tolist()
+    assert parents == released_parents
+    assert child_maps == released_child_maps
+    assert torch.equal(visibility, released_visibility)
+
+    for node in nodes:
+        expected_score = sum(
+            float(
+                lattice["candidate_unary_logits"][
+                    depth_index,
+                    candidate_index,
+                ]
+                - lattice["unary_logsumexp"][depth_index]
+            )
+            for depth_index, candidate_index in enumerate(node.path_candidate_indices)
+        )
+        assert node.log_prefix_score == pytest.approx(
+            expected_score,
+            abs=1e-5,
+        )
 
 
 def test_candidate_diagnostics_classify_failures_and_censoring() -> None:

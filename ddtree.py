@@ -9,12 +9,21 @@ import torch
 from transformers import AutoModelForCausalLM, DynamicCache
 
 from model import DFlashDraftModel, sample, extract_context_feature
-from dflash import dflash_generate, cuda_time, empty_stage_times
+from dflash import (
+    dflash_generate,
+    cuda_time,
+    empty_stage_times,
+    end_to_end_timing_fields,
+)
 from offline_dflash2_trees import TreeNode
 
 
 DDTREE_STAGE_ORDER = ("draft", "tree_build", "tree_compile", "verify", "commit")
-DDTREE_TREE_BUILD_STAGE_ORDER = ("tree_build_copy", "tree_build_heap", "tree_build_visibility")
+DDTREE_TREE_BUILD_STAGE_ORDER = (
+    "tree_build_copy",
+    "tree_build_heap",
+    "tree_build_visibility",
+)
 
 
 _CPP_COMPACT_ENABLED = False
@@ -26,7 +35,9 @@ def load_cpp_compact_module():
         import pybind11
         from torch.utils.cpp_extension import load_inline
     except Exception as exc:
-        logger.warning(f"torch.utils.cpp_extension is unavailable; falling back to Python cache compaction. {exc}")
+        logger.warning(
+            f"torch.utils.cpp_extension is unavailable; falling back to Python cache compaction. {exc}"
+        )
         return None
 
     cpp_source = r"""
@@ -87,7 +98,14 @@ def maybe_enable_cpp_compact(enabled: bool) -> None:
 def build_ddtree_tree(
     draft_logits: torch.Tensor,
     budget: int,
-) -> tuple[torch.Tensor, torch.Tensor, list[int], list[dict[int, int]], torch.Tensor, dict[str, float]]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    list[int],
+    list[dict[int, int]],
+    torch.Tensor,
+    dict[str, float],
+]:
     build_subtimes = empty_stage_times(DDTREE_TREE_BUILD_STAGE_ORDER)
 
     if budget <= 0 or draft_logits.shape[0] == 0:
@@ -118,7 +136,9 @@ def build_ddtree_tree(
 
     heap_start = time.perf_counter()
     first_logw = float(top_log_probs_np[0, 0])
-    heap: list[tuple[float, tuple[int, ...], int, int, int, float]] = [(-first_logw, (0,), 0, 1, 0, first_logw)]
+    heap: list[tuple[float, tuple[int, ...], int, int, int, float]] = [
+        (-first_logw, (0,), 0, 1, 0, first_logw)
+    ]
 
     node_token_ids_np = np.empty(budget, dtype=np.int64)
     node_depths_np = np.empty(budget, dtype=np.int64)
@@ -141,13 +161,30 @@ def build_ddtree_tree(
 
         if rank + 1 < topk:
             sibling_ranks = ranks[:-1] + (rank + 1,)
-            sibling_logw = logw - float(top_log_probs_np[depth - 1, rank]) + float(top_log_probs_np[depth - 1, rank + 1])
-            heapq.heappush(heap, (-sibling_logw, sibling_ranks, parent_index, depth, rank + 1, sibling_logw))
+            sibling_logw = (
+                logw
+                - float(top_log_probs_np[depth - 1, rank])
+                + float(top_log_probs_np[depth - 1, rank + 1])
+            )
+            heapq.heappush(
+                heap,
+                (
+                    -sibling_logw,
+                    sibling_ranks,
+                    parent_index,
+                    depth,
+                    rank + 1,
+                    sibling_logw,
+                ),
+            )
 
         if depth < depth_limit:
             child_ranks = ranks + (0,)
             child_logw = logw + float(top_log_probs_np[depth, 0])
-            heapq.heappush(heap, (-child_logw, child_ranks, current_index, depth + 1, 0, child_logw))
+            heapq.heappush(
+                heap,
+                (-child_logw, child_ranks, current_index, depth + 1, 0, child_logw),
+            )
 
     build_subtimes["tree_build_heap"] = time.perf_counter() - heap_start
 
@@ -183,9 +220,7 @@ def compile_generic_tree_for_verifier(
     if budget < 0:
         raise ValueError("tree budget must be non-negative")
     if len(nodes) > budget:
-        raise ValueError(
-            f"tree has {len(nodes)} nodes but budget is {budget}"
-        )
+        raise ValueError(f"tree has {len(nodes)} nodes but budget is {budget}")
 
     node_token_ids = torch.empty(len(nodes), dtype=torch.long)
     node_depths = torch.empty(len(nodes), dtype=torch.long)
@@ -200,36 +235,22 @@ def compile_generic_tree_for_verifier(
     for node_index, node in enumerate(nodes):
         if not 1 <= node.depth <= depth_limit:
             raise ValueError(
-                f"node {node_index} depth {node.depth} is outside "
-                f"1..{depth_limit}"
+                f"node {node_index} depth {node.depth} is outside 1..{depth_limit}"
             )
         if node.parent < -1 or node.parent >= node_index:
-            raise ValueError(
-                f"node {node_index} has invalid parent {node.parent}"
-            )
+            raise ValueError(f"node {node_index} has invalid parent {node.parent}")
         if len(node.path_candidate_indices) != node.depth:
-            raise ValueError(
-                f"node {node_index} path length does not match its depth"
-            )
+            raise ValueError(f"node {node_index} path length does not match its depth")
         if node.parent == -1:
             if node.depth != 1:
-                raise ValueError(
-                    f"root child {node_index} must have depth 1"
-                )
+                raise ValueError(f"root child {node_index} must have depth 1")
             verifier_parent = 0
         else:
             parent = nodes[node.parent]
             if parent.depth != node.depth - 1:
-                raise ValueError(
-                    f"node {node_index} parent depth is inconsistent"
-                )
-            if (
-                node.path_candidate_indices[:-1]
-                != parent.path_candidate_indices
-            ):
-                raise ValueError(
-                    f"node {node_index} path does not extend its parent"
-                )
+                raise ValueError(f"node {node_index} parent depth is inconsistent")
+            if node.path_candidate_indices[:-1] != parent.path_candidate_indices:
+                raise ValueError(f"node {node_index} path does not extend its parent")
             verifier_parent = node.parent + 1
 
         verifier_index = node_index + 1
@@ -277,7 +298,12 @@ def compile_ddtree_tree(
     current_length = 1 + int(node_token_ids.numel())
 
     if previous_tree_length > 0:
-        attention_mask_buffer[0, 0, :previous_tree_length, previous_tree_start : previous_tree_start + previous_tree_length] = 0
+        attention_mask_buffer[
+            0,
+            0,
+            :previous_tree_length,
+            previous_tree_start : previous_tree_start + previous_tree_length,
+        ] = 0
 
     verify_input_ids = verify_input_ids_buffer[:, :current_length]
     verify_input_ids[0, 0] = root_token_id
@@ -293,15 +319,27 @@ def compile_ddtree_tree(
     visibility = tree_visibility_buffer[:current_length, :current_length]
     visibility.copy_(visibility_cpu, non_blocking=False)
 
-    tree_block = attention_mask_buffer[0, 0, :current_length, past_length : past_length + current_length]
+    tree_block = attention_mask_buffer[
+        0, 0, :current_length, past_length : past_length + current_length
+    ]
     tree_block.fill_(torch.finfo(dtype).min)
     tree_block.masked_fill_(visibility, 0)
 
-    attention_mask = attention_mask_buffer[:, :, :current_length, : past_length + current_length]
-    return verify_input_ids, verify_position_ids, attention_mask, past_length, current_length
+    attention_mask = attention_mask_buffer[
+        :, :, :current_length, : past_length + current_length
+    ]
+    return (
+        verify_input_ids,
+        verify_position_ids,
+        attention_mask,
+        past_length,
+        current_length,
+    )
 
 
-def follow_verified_tree(child_maps: list[dict[int, int]], posterior: torch.Tensor) -> tuple[list[int], int]:
+def follow_verified_tree(
+    child_maps: list[dict[int, int]], posterior: torch.Tensor
+) -> tuple[list[int], int]:
     posterior_tokens = posterior[0].tolist()
     accepted_indices = [0]
     current_index = 0
@@ -315,7 +353,9 @@ def follow_verified_tree(child_maps: list[dict[int, int]], posterior: torch.Tens
     return accepted_indices, next_token
 
 
-def _compact_appended_window(cache_tensor: torch.Tensor, past_length: int, keep_current_indices: torch.Tensor) -> None:
+def _compact_appended_window(
+    cache_tensor: torch.Tensor, past_length: int, keep_current_indices: torch.Tensor
+) -> None:
     current_length = cache_tensor.shape[-2] - past_length
     if current_length <= 0:
         return
@@ -330,11 +370,15 @@ def _compact_appended_window(cache_tensor: torch.Tensor, past_length: int, keep_
             module.compact_tail_inplace(cache_tensor, past_length, keep_current_indices)
             return
 
-    kept_tail = cache_tensor.narrow(-2, past_length, current_length).index_select(-2, keep_current_indices)
+    kept_tail = cache_tensor.narrow(-2, past_length, current_length).index_select(
+        -2, keep_current_indices
+    )
     cache_tensor.narrow(-2, past_length, keep_count).copy_(kept_tail)
 
 
-def compact_dynamic_cache(past_key_values: DynamicCache, past_length: int, keep_current_indices: list[int]) -> None:
+def compact_dynamic_cache(
+    past_key_values: DynamicCache, past_length: int, keep_current_indices: list[int]
+) -> None:
     if len(keep_current_indices) == 0:
         past_key_values.crop(past_length)
         return
@@ -343,10 +387,14 @@ def compact_dynamic_cache(past_key_values: DynamicCache, past_length: int, keep_
 
     def get_keep_tensor(device: torch.device) -> torch.Tensor:
         if device not in keep_tensor_by_device:
-            keep_tensor_by_device[device] = torch.tensor(keep_current_indices, dtype=torch.long, device=device)
+            keep_tensor_by_device[device] = torch.tensor(
+                keep_current_indices, dtype=torch.long, device=device
+            )
         return keep_tensor_by_device[device]
 
-    if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache"):
+    if hasattr(past_key_values, "key_cache") and hasattr(
+        past_key_values, "value_cache"
+    ):
         for layer_idx in range(len(past_key_values.key_cache)):
             key_cache = past_key_values.key_cache[layer_idx]
             value_cache = past_key_values.value_cache[layer_idx]
@@ -358,7 +406,11 @@ def compact_dynamic_cache(past_key_values: DynamicCache, past_length: int, keep_
 
     if hasattr(past_key_values, "layers"):
         for layer in past_key_values.layers:
-            if not hasattr(layer, "keys") or layer.keys is None or layer.keys.numel() == 0:
+            if (
+                not hasattr(layer, "keys")
+                or layer.keys is None
+                or layer.keys.numel() == 0
+            ):
                 continue
             keep_tensor = get_keep_tensor(layer.keys.device)
             _compact_appended_window(layer.keys, past_length, keep_tensor)
@@ -407,16 +459,26 @@ def ddtree_generate(
         device=model.device,
     )
     position_ids = torch.arange(output_ids.shape[1], device=model.device).unsqueeze(0)
-    stop_token_ids_tensor = None if stop_token_ids is None else torch.tensor(stop_token_ids, device=model.device)
+    stop_token_ids_tensor = (
+        None
+        if stop_token_ids is None
+        else torch.tensor(stop_token_ids, device=model.device)
+    )
 
-    verify_input_ids_buffer = torch.empty((1, max_tree_nodes), dtype=torch.long, device=model.device)
-    verify_position_ids_buffer = torch.empty((1, max_tree_nodes), dtype=torch.long, device=model.device)
+    verify_input_ids_buffer = torch.empty(
+        (1, max_tree_nodes), dtype=torch.long, device=model.device
+    )
+    verify_position_ids_buffer = torch.empty(
+        (1, max_tree_nodes), dtype=torch.long, device=model.device
+    )
     attention_mask_buffer = torch.zeros(
         (1, 1, max_tree_nodes, max_length + max_tree_nodes),
         dtype=target.dtype,
         device=model.device,
     )
-    tree_visibility_buffer = torch.empty((max_tree_nodes, max_tree_nodes), dtype=torch.bool, device=model.device)
+    tree_visibility_buffer = torch.empty(
+        (max_tree_nodes, max_tree_nodes), dtype=torch.bool, device=model.device
+    )
 
     past_key_values_target = DynamicCache()
     past_key_values_draft = DynamicCache()
@@ -433,8 +495,12 @@ def ddtree_generate(
     )
 
     output_ids[:, :num_input_tokens] = input_ids
-    output_ids[:, num_input_tokens : num_input_tokens + 1] = sample(output.logits, temperature)
-    target_hidden = extract_context_feature(output.hidden_states, model.target_layer_ids)
+    output_ids[:, num_input_tokens : num_input_tokens + 1] = sample(
+        output.logits, temperature
+    )
+    target_hidden = extract_context_feature(
+        output.hidden_states, model.target_layer_ids
+    )
 
     time_to_first_token = cuda_time() - prefill_start
 
@@ -454,14 +520,18 @@ def ddtree_generate(
 
         draft_stage_start = cuda_time()
         noise_embedding = target.model.embed_tokens(block_output_ids)
-        draft_logits = target.lm_head(model(
-            target_hidden=target_hidden,
-            noise_embedding=noise_embedding,
-            position_ids=position_ids[:, past_key_values_draft.get_seq_length() : start + block_size],
-            past_key_values=past_key_values_draft,
-            use_cache=True,
-            is_causal=False,
-        )[:, -draft_horizon:, :])
+        draft_logits = target.lm_head(
+            model(
+                target_hidden=target_hidden,
+                noise_embedding=noise_embedding,
+                position_ids=position_ids[
+                    :, past_key_values_draft.get_seq_length() : start + block_size
+                ],
+                past_key_values=past_key_values_draft,
+                use_cache=True,
+                is_causal=False,
+            )[:, -draft_horizon:, :]
+        )
         past_key_values_draft.crop(start)
         draft_stage_elapsed = cuda_time() - draft_stage_start
         if draft_prefill:
@@ -471,15 +541,26 @@ def ddtree_generate(
             stage_times["draft"] += draft_stage_elapsed
 
         tree_build_start = cuda_time()
-        node_token_ids, node_depths, parents, child_maps, visibility_cpu, tree_build_subtimes = build_ddtree_tree(
-            draft_logits[0], tree_budget
-        )
+        (
+            node_token_ids,
+            node_depths,
+            parents,
+            child_maps,
+            visibility_cpu,
+            tree_build_subtimes,
+        ) = build_ddtree_tree(draft_logits[0], tree_budget)
         stage_times["tree_build"] += cuda_time() - tree_build_start
         for stage_name, stage_elapsed in tree_build_subtimes.items():
             stage_times[stage_name] += stage_elapsed
 
         tree_compile_start = cuda_time()
-        verify_input_ids, verify_position_ids, verify_attention_mask, previous_tree_start, previous_tree_length = compile_ddtree_tree(
+        (
+            verify_input_ids,
+            verify_position_ids,
+            verify_attention_mask,
+            previous_tree_start,
+            previous_tree_length,
+        ) = compile_ddtree_tree(
             root_token_id=root_token[0, 0],
             start=start,
             node_token_ids=node_token_ids,
@@ -511,28 +592,36 @@ def ddtree_generate(
         commit_stage_start = cuda_time()
         posterior = sample(output.logits, temperature)
         accepted_indices, next_token = follow_verified_tree(child_maps, posterior)
-        accepted_index_tensor = torch.tensor(accepted_indices, dtype=torch.long, device=verify_input_ids.device)
+        accepted_index_tensor = torch.tensor(
+            accepted_indices, dtype=torch.long, device=verify_input_ids.device
+        )
         accepted_tokens = verify_input_ids.index_select(1, accepted_index_tensor)
 
         output_ids[:, start : start + len(accepted_indices)] = accepted_tokens
         output_ids[:, start + len(accepted_indices)] = next_token
 
         compact_dynamic_cache(past_key_values_target, start, accepted_indices)
-        target_hidden = extract_context_feature(output.hidden_states, model.target_layer_ids).index_select(1, accepted_index_tensor)
+        target_hidden = extract_context_feature(
+            output.hidden_states, model.target_layer_ids
+        ).index_select(1, accepted_index_tensor)
 
         acceptance_lengths.append(len(accepted_indices))
         start += len(accepted_indices)
         stage_times["commit"] += cuda_time() - commit_stage_start
         round_timestamps.append(cuda_time() - round_clock_start)
         if save_tree_traces:
-            round_trees.append({
-                "accepted_indices": [int(index) for index in accepted_indices],
-                "tree": {
-                    "node_token_ids": [int(token_id) for token_id in node_token_ids.tolist()],
-                    "node_depths": [int(depth) for depth in node_depths.tolist()],
-                    "parents": [int(parent) for parent in parents],
-                },
-            })
+            round_trees.append(
+                {
+                    "accepted_indices": [int(index) for index in accepted_indices],
+                    "tree": {
+                        "node_token_ids": [
+                            int(token_id) for token_id in node_token_ids.tolist()
+                        ],
+                        "node_depths": [int(depth) for depth in node_depths.tolist()],
+                        "parents": [int(parent) for parent in parents],
+                    },
+                }
+            )
 
         if stop_token_ids_tensor is not None:
             new_tokens = output_ids[:, start - len(accepted_indices) : start + 1]
@@ -542,12 +631,17 @@ def ddtree_generate(
     output_ids = output_ids[:, :max_length]
     output_ids = output_ids[:, output_ids[0] != mask_token_id]
     if stop_token_ids_tensor is not None:
-        stop_token_indices = torch.isin(output_ids[0][num_input_tokens:], stop_token_ids_tensor).nonzero(as_tuple=True)[0]
+        stop_token_indices = torch.isin(
+            output_ids[0][num_input_tokens:], stop_token_ids_tensor
+        ).nonzero(as_tuple=True)[0]
         if stop_token_indices.numel() > 0:
             output_ids = output_ids[:, : num_input_tokens + stop_token_indices[0] + 1]
 
     num_output_tokens = output_ids.shape[1] - num_input_tokens
-    total_decode_time = cuda_time() - decode_start
+    timing_fields = end_to_end_timing_fields(
+        prefill_start, decode_start, num_output_tokens
+    )
+    total_decode_time = timing_fields["decode_time"]
     time_per_output_token = total_decode_time / max(num_output_tokens, 1)
 
     return SimpleNamespace(
@@ -561,4 +655,5 @@ def ddtree_generate(
         stage_times=stage_times,
         round_timestamps=round_timestamps,
         round_trees=round_trees,
+        **timing_fields,
     )

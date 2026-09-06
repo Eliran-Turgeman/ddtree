@@ -9,7 +9,7 @@ from ddtree import (
     compile_generic_tree_for_verifier,
     follow_verified_tree,
 )
-from dflash import cuda_time, empty_stage_times
+from dflash import cuda_time, empty_stage_times, end_to_end_timing_fields
 from generation_cache import create_generation_cache, retain_cache_prefix
 from model import DFlash2DraftModel, extract_context_feature
 from model.dflash2 import DFlash2Proposal
@@ -692,9 +692,12 @@ def dflash2_tree_generate(
         verifier_bonus_committed_per_round.append(verifier_bonus_committed)
         round_timestamps.append(cuda_time() - decode_start)
 
-    total_decode_time = cuda_time() - decode_start
     output_ids = output_ids[:, : min(start + 1, max_length)]
     num_output_tokens = output_ids.shape[1] - num_input_tokens
+    timing_fields = end_to_end_timing_fields(
+        prefill_start, decode_start, num_output_tokens
+    )
+    total_decode_time = timing_fields["decode_time"]
     annotate_candidate_diagnostics(
         round_metrics,
         round_candidate_ids,
@@ -716,4 +719,5 @@ def dflash2_tree_generate(
         stage_times=stage_times,
         round_timestamps=round_timestamps,
         round_metrics=round_metrics,
+        **timing_fields,
     )

@@ -146,7 +146,10 @@ def dflash_generate(
             output_ids = output_ids[:, : num_input_tokens + stop_token_indices[0] + 1]
 
     num_output_tokens = output_ids.shape[1] - num_input_tokens
-    total_decode_time = cuda_time() - decode_start
+    timing_fields = end_to_end_timing_fields(
+        prefill_start, decode_start, num_output_tokens
+    )
+    total_decode_time = timing_fields["decode_time"]
     time_per_output_token = total_decode_time / max(num_output_tokens, 1)
 
     return SimpleNamespace(
@@ -159,6 +162,7 @@ def dflash_generate(
         decode_rounds=len(acceptance_lengths),
         stage_times=stage_times,
         round_timestamps=round_timestamps,
+        **timing_fields,
     )
 
 
@@ -169,3 +173,32 @@ def cuda_time() -> float:
 
 def empty_stage_times(stage_names: tuple[str, ...]) -> dict[str, float]:
     return {stage_name: 0.0 for stage_name in stage_names}
+
+
+def end_to_end_timing_fields(
+    prefill_start: float,
+    decode_start: float,
+    num_output_tokens: int,
+) -> dict[str, float]:
+    """Compute shared end-to-end timing fields for every ``*_generate`` variant.
+
+    Called exactly once, at the point where each generator already measures
+    ``total_decode_time = cuda_time() - decode_start``, so it adds no extra
+    CUDA synchronization. ``total_generation_time`` spans the full prefill
+    (from ``prefill_start``) through the end of decoding, unlike the
+    existing ``decode_time``/``time_per_output_token`` measurements which
+    intentionally exclude the first draft round's one-time overhead. This
+    gives a fair, comparable end-to-end tokens/s figure across methods while
+    leaving existing decode-only semantics untouched.
+    """
+    generation_end = cuda_time()
+    decode_time = generation_end - decode_start
+    total_generation_time = generation_end - prefill_start
+    tokens_per_second = (
+        num_output_tokens / total_generation_time if total_generation_time > 0 else 0.0
+    )
+    return {
+        "decode_time": decode_time,
+        "total_generation_time": total_generation_time,
+        "tokens_per_second": tokens_per_second,
+    }

@@ -2,6 +2,7 @@ import torch
 from typing import Optional
 from datasets import load_dataset, Features, Sequence, Value
 
+
 def build_target_layer_ids(num_target_layers: int, num_draft_layers: int):
     if num_draft_layers == 1:
         return [(num_target_layers // 2)]
@@ -14,6 +15,7 @@ def build_target_layer_ids(num_target_layers: int, num_draft_layers: int):
     ]
     return target_layer_ids
 
+
 def extract_context_feature(
     hidden_states: list[torch.Tensor],
     layer_ids: Optional[list[int]],
@@ -25,6 +27,7 @@ def extract_context_feature(
     target_hidden = torch.cat(selected_states, dim=-1)
     return target_hidden
 
+
 def sample(logits: torch.Tensor, temperature: float = 0.0) -> torch.Tensor:
     if temperature < 1e-5:
         return torch.argmax(logits, dim=-1)
@@ -34,18 +37,22 @@ def sample(logits: torch.Tensor, temperature: float = 0.0) -> torch.Tensor:
     probs = torch.softmax(logits, dim=-1)
     return torch.multinomial(probs, num_samples=1).view(bsz, seq_len)
 
-def load_and_process_dataset(data_name: str):
+
+def load_and_process_dataset(data_name: str, revision: str | None = None):
+    revision_kwargs = {"revision": revision} if revision is not None else {}
     # Math datasets
     if data_name == "gsm8k":
-        dataset = load_dataset("openai/gsm8k", "main", split="test")
+        dataset = load_dataset("openai/gsm8k", "main", split="test", **revision_kwargs)
         prompt_fmt = "{question}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
         dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
-    
+
     elif data_name == "math500":
-        dataset = load_dataset("HuggingFaceH4/MATH-500", split="test")
+        dataset = load_dataset(
+            "HuggingFaceH4/MATH-500", split="test", **revision_kwargs
+        )
         prompt_fmt = "{problem}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
         dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
-    
+
     elif data_name == "aime24":
         dataset = load_dataset("HuggingFaceH4/aime_2024", split="train")
         prompt_fmt = "{problem}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
@@ -56,26 +63,40 @@ def load_and_process_dataset(data_name: str):
         prompt_fmt = "{problem}\nPlease reason step by step, and put your final answer within \\boxed{{}}."
         dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
 
-    # Chat datasets 
+    # Chat datasets
     elif data_name == "alpaca":
         dataset = load_dataset("tatsu-lab/alpaca", split="train")
-        dataset = dataset.map(lambda x: {"formatted_input": (f"{x['instruction']}\n\nInput:\n{x['input']}" if x['input'] else x['instruction'])})
+        dataset = dataset.map(
+            lambda x: {
+                "formatted_input": (
+                    f"{x['instruction']}\n\nInput:\n{x['input']}"
+                    if x["input"]
+                    else x["instruction"]
+                )
+            }
+        )
         dataset = dataset.map(lambda x: {"turns": [x["formatted_input"]]})
 
     elif data_name == "mt-bench":
-        dataset = load_dataset("HuggingFaceH4/mt_bench_prompts", split="train")
+        dataset = load_dataset(
+            "HuggingFaceH4/mt_bench_prompts", split="train", **revision_kwargs
+        )
         dataset = dataset.map(lambda x: {"turns": x["prompt"]})
 
     # Coding datasets
     elif data_name == "humaneval":
-        dataset = load_dataset("openai/openai_humaneval", split="test")
+        dataset = load_dataset(
+            "openai/openai_humaneval", split="test", **revision_kwargs
+        )
         prompt_fmt = "Write a solution to the following problem and make sure that it passes the tests:\n```python\n{prompt}\n```"
         dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
-    
+
     elif data_name == "mbpp":
-        dataset = load_dataset("google-research-datasets/mbpp", "sanitized", split="test")
+        dataset = load_dataset(
+            "google-research-datasets/mbpp", "sanitized", split="test"
+        )
         dataset = dataset.map(lambda x: {"turns": [x["prompt"]]})
-    
+
     elif data_name == "lbpp":
         LBPP_PY_TEST_URL = "https://huggingface.co/datasets/CohereLabs/lbpp/resolve/main/python/test.parquet"
         dataset = load_dataset("parquet", data_files={"test": LBPP_PY_TEST_URL})["test"]
@@ -85,12 +106,20 @@ def load_and_process_dataset(data_name: str):
         dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
         prompt_fmt = "Problem Statement:\n{problem_statement}\nPlease fix the issue described above."
         dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
-    
+
     elif data_name == "livecodebench":
         base = "https://huggingface.co/datasets/livecodebench/code_generation_lite/resolve/main/"
-        allowed_files = ["test.jsonl", "test2.jsonl", "test3.jsonl", "test4.jsonl", "test5.jsonl", "test6.jsonl"]
+        allowed_files = [
+            "test.jsonl",
+            "test2.jsonl",
+            "test3.jsonl",
+            "test4.jsonl",
+            "test5.jsonl",
+            "test6.jsonl",
+        ]
         urls = [base + fn for fn in allowed_files]
         dataset = load_dataset("json", data_files={"test": urls})["test"]
+
         def format_lcb(doc):
             system_prompt = (
                 "You are an expert Python programmer. You will be given a question (problem specification) "
@@ -106,11 +135,12 @@ def load_and_process_dataset(data_name: str):
                 code_block = "```python\n# YOUR CODE HERE\n```"
             answer_footer = "### Answer: (use the provided format with backticks)"
             return f"{system_prompt}\n\n{question_block}\n\n{format_message}\n{code_block}\n\n{answer_footer}"
+
         target_features = Features({"turns": Sequence(Value("large_string"))})
         dataset = dataset.map(
             lambda x: {"turns": [format_lcb(x)]},
             remove_columns=dataset.column_names,
-            features=target_features
+            features=target_features,
         )
-    
+
     return dataset

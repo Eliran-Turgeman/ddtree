@@ -11,6 +11,30 @@ TREE_METHOD_PATTERN = re.compile(
     r"^dflash2_(unary|pairwise)_k16_tb(\d+)"
     r"-sanitized_eval_results$"
 )
+STEP9_METHOD_PATTERNS = (
+    (
+        re.compile(r"^ddtree_tb(\d+)-sanitized_eval_results$"),
+        "dflash-original-ddtree",
+    ),
+    (
+        re.compile(
+            r"^dflash2_original_ddtree_tb(\d+)"
+            r"-sanitized_eval_results$"
+        ),
+        "dflash2-original-ddtree",
+    ),
+    (
+        re.compile(r"^dflash2_unary_k16_tb(\d+)-sanitized_eval_results$"),
+        "dflash2-unary-k16",
+    ),
+    (
+        re.compile(
+            r"^dflash2_pairwise_k16_tb(\d+)"
+            r"-sanitized_eval_results$"
+        ),
+        "dflash2-pairwise-k16",
+    ),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,10 +49,18 @@ def parse_args() -> argparse.Namespace:
 def method_identity(stem: str) -> tuple[str, int | None]:
     if stem == "baseline-sanitized_eval_results":
         return "target-only", None
+    if stem == "dflash-sanitized_eval_results":
+        return "dflash", None
+    if stem == "dflash2-sanitized_eval_results":
+        return "dflash2", None
     match = TREE_METHOD_PATTERN.match(stem)
-    if match is None:
-        raise ValueError(f"unexpected EvalPlus result name: {stem}")
-    return match.group(1), int(match.group(2))
+    if match is not None:
+        return match.group(1), int(match.group(2))
+    for pattern, label in STEP9_METHOD_PATTERNS:
+        match = pattern.match(stem)
+        if match is not None:
+            return label, int(match.group(1))
+    raise ValueError(f"unexpected EvalPlus result name: {stem}")
 
 
 def main() -> None:
@@ -46,9 +78,7 @@ def main() -> None:
         passed = sum(status == "pass" for status in statuses)
         rows.append(
             {
-                "method_key": path.stem.removesuffix(
-                    "-sanitized_eval_results"
-                ),
+                "method_key": path.stem.removesuffix("-sanitized_eval_results"),
                 "method": method,
                 "budget": "" if budget is None else budget,
                 "evaluated": len(statuses),

@@ -62,6 +62,49 @@ def parse_dflash2_tree_configs(
     return configs
 
 
+def rotate_method_order(
+    method_keys: list[str],
+    dataset_index: int,
+    turn_index: int,
+    repetition_index: int,
+) -> list[str]:
+    """Deterministically permute the measured-method execution order.
+
+    The permutation is a pure function of ``(dataset_index, turn_index,
+    repetition_index)`` so no method is pinned to a position or predecessor
+    while the order remains fully reproducible from artifact metadata.
+    """
+    seed = dataset_index * 1_000_003 + turn_index * 9_176 + repetition_index
+    ordered = list(method_keys)
+    random.Random(seed).shuffle(ordered)
+    return ordered
+
+
+def attach_repetition_bookkeeping(
+    method_repetition_results: dict[str, list],
+    designated_index: int = 0,
+) -> dict[str, object]:
+    """Fold repeated timing measurements into one response per method.
+
+    Every measured repetition is preserved (for paired comparisons and
+    variance analysis) by attaching the full list as ``.repetitions`` on the
+    designated result. The designated repetition (``designated_index``,
+    default the first) is the only one whose output advances conversation
+    history and is compared against the baseline, so multi-turn semantics
+    are unaffected by the repetition count. With the default of a single
+    repetition, the returned object is identical to the pre-existing
+    single-result shape plus a ``.repetitions`` list containing itself,
+    so downstream consumers that only read the designated result are
+    unaffected.
+    """
+    response = {}
+    for method_key, repetition_results in method_repetition_results.items():
+        designated = repetition_results[designated_index]
+        designated.repetitions = repetition_results
+        response[method_key] = designated
+    return response
+
+
 def repository_metadata() -> dict[str, object]:
     try:
         commit = subprocess.run(
@@ -89,6 +132,162 @@ def repository_metadata() -> dict[str, object]:
     return {"commit": commit, "dirty": dirty}
 
 
+def run_method(
+    method_key: str,
+    *,
+    draft_model,
+    target,
+    tokenizer,
+    input_ids,
+    max_new_tokens: int,
+    temperature: float,
+    block_size: int,
+    method_key_to_tree_budget: dict[str, int],
+    method_key_to_tree_method: dict[str, str],
+    collect_allocation_data: bool,
+    prompt_id: str | None = None,
+):
+    """Dispatch a single generate() call for one method key.
+
+    Shared by warmup (``prompt_id=None``) and measured timing calls so the
+    method-to-generator mapping only needs to be maintained in one place.
+    """
+    if method_key in ("baseline", "dflash"):
+        return dflash_generate(
+            model=draft_model,
+            target=target,
+            input_ids=input_ids,
+            mask_token_id=draft_model.mask_token_id,
+            max_new_tokens=max_new_tokens,
+            block_size=1 if method_key == "baseline" else block_size,
+            stop_token_ids=[tokenizer.eos_token_id],
+            temperature=temperature,
+        )
+    if method_key.startswith("ddtree_tb"):
+        return ddtree_generate(
+            model=draft_model,
+            target=target,
+            input_ids=input_ids,
+            mask_token_id=draft_model.mask_token_id,
+            max_new_tokens=max_new_tokens,
+            block_size=block_size,
+            tree_budget=method_key_to_tree_budget[method_key],
+            stop_token_ids=[tokenizer.eos_token_id],
+            temperature=temperature,
+        )
+    if method_key == "dflash2":
+        return dflash2_generate(
+            model=draft_model,
+            target=target,
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            stop_token_ids=[tokenizer.eos_token_id],
+            prompt_id=prompt_id,
+            collect_traces=collect_allocation_data,
+        )
+    return dflash2_tree_generate(
+        model=draft_model,
+        target=target,
+        input_ids=input_ids,
+        max_new_tokens=max_new_tokens,
+        stop_token_ids=[tokenizer.eos_token_id],
+        tree_budget=method_key_to_tree_budget[method_key],
+        tree_method=method_key_to_tree_method[method_key],
+        prompt_id=prompt_id,
+        collect_tree_data=collect_allocation_data,
+    )
+
+
+def measure_method_with_peak_memory(
+    method_key: str,
+    *,
+    device: torch.device,
+    peak_memory_tracker: dict[str, float],
+    **run_method_kwargs,
+):
+    """Run one measured ``run_method`` call bracketed by CUDA peak-memory
+    resets so the returned result's ``peak_allocated_gib``/
+    ``peak_reserved_gib`` reflect only this one method/repetition call, not
+    everything that ran before it.
+
+    ``torch.cuda.max_memory_allocated``/``max_memory_reserved`` are
+    process-wide running maxima that only go up, so isolating a single
+    call's peak requires resetting them immediately beforehand. That would
+    normally destroy the true whole-run peak (previously read once, without
+    resets, at artifact-save time), so this also folds each reading into
+    ``peak_memory_tracker`` (a plain ``{"allocated_bytes": ..., "reserved_
+    bytes": ...}`` dict owned by the caller) before resetting, preserving
+    an accurate running maximum across every reset boundary for the
+    existing run-level metadata.
+    """
+    peak_memory_tracker["allocated_bytes"] = max(
+        peak_memory_tracker["allocated_bytes"],
+        torch.cuda.max_memory_allocated(device),
+    )
+    peak_memory_tracker["reserved_bytes"] = max(
+        peak_memory_tracker["reserved_bytes"],
+        torch.cuda.max_memory_reserved(device),
+    )
+    torch.cuda.reset_peak_memory_stats(device)
+
+    result = run_method(method_key, **run_method_kwargs)
+
+    call_peak_allocated = torch.cuda.max_memory_allocated(device)
+    call_peak_reserved = torch.cuda.max_memory_reserved(device)
+    result.peak_allocated_gib = call_peak_allocated / 1024**3
+    result.peak_reserved_gib = call_peak_reserved / 1024**3
+    peak_memory_tracker["allocated_bytes"] = max(
+        peak_memory_tracker["allocated_bytes"], call_peak_allocated
+    )
+    peak_memory_tracker["reserved_bytes"] = max(
+        peak_memory_tracker["reserved_bytes"], call_peak_reserved
+    )
+    return result
+
+
+def apply_baseline_comparison(
+    response: dict[str, object],
+    methods_to_run: list[str],
+    *,
+    comparable_to_baseline: bool,
+    dataset_index: int,
+) -> None:
+    """Attach ``.matches_baseline`` to every repetition of every measured
+    method against the sequential baseline's output ids.
+
+    This covers the whole method matrix -- raw DFlash and original DDTree
+    included, not just DFlash2 variants -- because Step 9's correctness.csv
+    needs exact-output match rates for every method. A no-op when
+    ``comparable_to_baseline`` is False (native-trajectory turns after the
+    first, where per-method history has already diverged and a baseline
+    comparison would not be meaningful).
+    """
+    if not comparable_to_baseline:
+        return
+    for method_key in methods_to_run:
+        baseline_repetitions = response["baseline"].repetitions
+        method_repetitions = response[method_key].repetitions
+        if len(method_repetitions) != len(baseline_repetitions):
+            raise ValueError(
+                f"{method_key} has {len(method_repetitions)} repetitions but "
+                f"baseline has {len(baseline_repetitions)}"
+            )
+        for repetition_result, baseline_result in zip(
+            method_repetitions, baseline_repetitions
+        ):
+            repetition_result.matches_baseline = torch.equal(
+                baseline_result.output_ids,
+                repetition_result.output_ids,
+            )
+        if not response[method_key].matches_baseline:
+            logger.warning(
+                f"{method_key} output differs from the sequential baseline "
+                f"for dataset index {dataset_index}. Inspect early or large "
+                "divergences; occasional BF16 argmax/tree-shape differences "
+                "are possible."
+            )
+
+
 def atomic_torch_save(value: object, path: Path) -> None:
     temporary_path = path.with_name(f"{path.name}.tmp")
     torch.save(value, temporary_path)
@@ -109,6 +308,7 @@ def main() -> None:
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--tree-budget", type=str, default="16,32,64,128,256,512,1024")
     parser.add_argument("--dataset", type=str, required=True)
+    parser.add_argument("--dataset-revision", type=str, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=16384)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -139,8 +339,23 @@ def main() -> None:
             "assistant response instead of sharing the final method's history."
         ),
     )
+    parser.add_argument(
+        "--timing-repetitions",
+        type=int,
+        default=1,
+        help=(
+            "Number of times to repeat timing measurement per method per "
+            "turn from the same input context. Only the first repetition "
+            "advances conversation history and is compared against the "
+            "baseline; every repetition's timing is preserved in the "
+            "artifact for paired comparisons."
+        ),
+    )
     parser.add_argument("--save-path", type=str, default=None)
     args = parser.parse_args()
+
+    if args.timing_repetitions < 1:
+        parser.error("--timing-repetitions must be a positive integer")
 
     if args.draft_type == "dflash2":
         if args.temperature != 0.0:
@@ -274,7 +489,7 @@ def main() -> None:
         args.model_name_or_path,
         revision=args.model_revision,
     )
-    dataset = load_and_process_dataset(args.dataset)
+    dataset = load_and_process_dataset(args.dataset, revision=args.dataset_revision)
 
     if args.max_samples is not None and len(dataset) > args.max_samples:
         dataset = dataset.shuffle(seed=0).select(range(args.max_samples))
@@ -290,62 +505,39 @@ def main() -> None:
     )
     warmup_max_new_tokens = min(args.max_new_tokens, 16)
 
-    _ = dflash_generate(
-        model=draft_model,
+    _ = run_method(
+        "baseline",
+        draft_model=draft_model,
         target=target,
+        tokenizer=tokenizer,
         input_ids=warmup_input_ids,
-        mask_token_id=draft_model.mask_token_id,
         max_new_tokens=warmup_max_new_tokens,
-        block_size=1,
-        stop_token_ids=[tokenizer.eos_token_id],
         temperature=args.temperature,
+        block_size=block_size,
+        method_key_to_tree_budget=method_key_to_tree_budget,
+        method_key_to_tree_method=method_key_to_tree_method,
+        collect_allocation_data=args.collect_allocation_data,
     )
     for method_key in methods_to_run:
-        if method_key == "dflash":
-            _ = dflash_generate(
-                model=draft_model,
-                target=target,
-                input_ids=warmup_input_ids,
-                mask_token_id=draft_model.mask_token_id,
-                max_new_tokens=warmup_max_new_tokens,
-                block_size=block_size,
-                stop_token_ids=[tokenizer.eos_token_id],
-                temperature=args.temperature,
-            )
-        elif method_key.startswith("ddtree_tb"):
-            _ = ddtree_generate(
-                model=draft_model,
-                target=target,
-                input_ids=warmup_input_ids,
-                mask_token_id=draft_model.mask_token_id,
-                max_new_tokens=warmup_max_new_tokens,
-                block_size=block_size,
-                tree_budget=method_key_to_tree_budget[method_key],
-                stop_token_ids=[tokenizer.eos_token_id],
-                temperature=args.temperature,
-            )
-        elif method_key == "dflash2":
-            _ = dflash2_generate(
-                model=draft_model,
-                target=target,
-                input_ids=warmup_input_ids,
-                max_new_tokens=warmup_max_new_tokens,
-                stop_token_ids=[tokenizer.eos_token_id],
-                collect_traces=args.collect_allocation_data,
-            )
-        else:
-            _ = dflash2_tree_generate(
-                model=draft_model,
-                target=target,
-                input_ids=warmup_input_ids,
-                max_new_tokens=warmup_max_new_tokens,
-                stop_token_ids=[tokenizer.eos_token_id],
-                tree_budget=method_key_to_tree_budget[method_key],
-                tree_method=method_key_to_tree_method[method_key],
-                collect_tree_data=args.collect_allocation_data,
-            )
+        _ = run_method(
+            method_key,
+            draft_model=draft_model,
+            target=target,
+            tokenizer=tokenizer,
+            input_ids=warmup_input_ids,
+            max_new_tokens=warmup_max_new_tokens,
+            temperature=args.temperature,
+            block_size=block_size,
+            method_key_to_tree_budget=method_key_to_tree_budget,
+            method_key_to_tree_method=method_key_to_tree_method,
+            collect_allocation_data=args.collect_allocation_data,
+        )
 
     save_path = Path(args.save_path) if args.save_path is not None else None
+    peak_memory_tracker = {
+        "allocated_bytes": float(torch.cuda.max_memory_allocated(device)),
+        "reserved_bytes": float(torch.cuda.max_memory_reserved(device)),
+    }
     partial_path = (
         save_path.with_name(f"{save_path.stem}.partial{save_path.suffix}")
         if save_path is not None and dist.size() == 1
@@ -405,6 +597,13 @@ def main() -> None:
             "draft_type": args.draft_type,
             "draft_attn_implementation": draft_attn_implementation,
             "target_attn_implementation": (target_attn_implementation),
+            "target_dtype": str(target.dtype),
+            "draft_dtype": str(draft_model.dtype),
+            "timing_repetitions": args.timing_repetitions,
+            "method_order_seed_formula": (
+                "dataset_index * 1_000_003 + turn_index * 9_176 + repetition_index, "
+                "then random.Random(seed).shuffle(method_keys)"
+            ),
             "trajectory_mode": (
                 "native" if args.native_method_trajectories else "controlled_shared"
             ),
@@ -416,10 +615,21 @@ def main() -> None:
                 "cuda": torch.version.cuda,
                 "gpu": torch.cuda.get_device_name(device),
                 "peak_allocated_gib": (
-                    torch.cuda.max_memory_allocated(device) / 1024**3
+                    max(
+                        peak_memory_tracker["allocated_bytes"],
+                        torch.cuda.max_memory_allocated(device),
+                    )
+                    / 1024**3
                 ),
-                "peak_reserved_gib": (torch.cuda.max_memory_reserved(device) / 1024**3),
+                "peak_reserved_gib": (
+                    max(
+                        peak_memory_tracker["reserved_bytes"],
+                        torch.cuda.max_memory_reserved(device),
+                    )
+                    / 1024**3
+                ),
                 "decode_timing_excludes_first_draft_prefill": True,
+                "total_generation_time_includes_first_draft_prefill": True,
             },
             "repository": repository_metadata(),
             "target_revision": getattr(
@@ -463,15 +673,29 @@ def main() -> None:
         }
         instance_responses = []
         for turn_index, user_content in enumerate(instance["turns"]):
-            response = {}
-            for method_key in ("baseline", *methods_to_run):
+            all_method_keys = ("baseline", *methods_to_run)
+
+            # Advance conversational context exactly once per turn, before
+            # any method runs, so the rotated per-repetition execution
+            # order below cannot change which methods see the latest user
+            # turn (previously this only worked because "baseline" always
+            # ran first and happened to be the one appending it in shared
+            # mode).
+            if args.native_method_trajectories:
+                for method_key in all_method_keys:
+                    native_messages[method_key].append(
+                        {"role": "user", "content": user_content}
+                    )
+            else:
+                shared_messages.append({"role": "user", "content": user_content})
+
+            method_inputs = {}
+            for method_key in all_method_keys:
                 messages = (
                     native_messages[method_key]
                     if args.native_method_trajectories
                     else shared_messages
                 )
-                if args.native_method_trajectories or method_key == "baseline":
-                    messages.append({"role": "user", "content": user_content})
                 input_text = tokenizer.apply_chat_template(
                     messages,
                     tokenize=False,
@@ -487,96 +711,69 @@ def main() -> None:
                     f"{args.dataset}:selected:{idx}:turn-{turn_index}:"
                     f"{method_key}:{prompt_hash[:12]}"
                 )
-                if method_key == "baseline":
-                    response[method_key] = dflash_generate(
-                        model=draft_model,
-                        target=target,
-                        input_ids=input_ids,
-                        mask_token_id=draft_model.mask_token_id,
-                        max_new_tokens=args.max_new_tokens,
-                        block_size=1,
-                        stop_token_ids=[tokenizer.eos_token_id],
-                        temperature=args.temperature,
-                    )
-                    if args.native_method_trajectories:
-                        result = response[method_key]
-                        generated_ids = result.output_ids[
-                            0,
-                            result.num_input_tokens :,
-                        ]
-                        native_messages[method_key].append(
-                            {
-                                "role": "assistant",
-                                "content": tokenizer.decode(
-                                    generated_ids,
-                                    skip_special_tokens=True,
-                                ),
-                            }
-                        )
-                    continue
-                if method_key == "dflash":
-                    response[method_key] = dflash_generate(
-                        model=draft_model,
-                        target=target,
-                        input_ids=input_ids,
-                        mask_token_id=draft_model.mask_token_id,
-                        max_new_tokens=args.max_new_tokens,
-                        block_size=block_size,
-                        stop_token_ids=[tokenizer.eos_token_id],
-                        temperature=args.temperature,
-                    )
-                elif method_key.startswith("ddtree_tb"):
-                    response[method_key] = ddtree_generate(
-                        model=draft_model,
-                        target=target,
-                        input_ids=input_ids,
-                        mask_token_id=draft_model.mask_token_id,
-                        max_new_tokens=args.max_new_tokens,
-                        block_size=block_size,
-                        tree_budget=method_key_to_tree_budget[method_key],
-                        stop_token_ids=[tokenizer.eos_token_id],
-                        temperature=args.temperature,
-                    )
-                elif method_key == "dflash2":
-                    response[method_key] = dflash2_generate(
-                        model=draft_model,
-                        target=target,
-                        input_ids=input_ids,
-                        max_new_tokens=args.max_new_tokens,
-                        stop_token_ids=[tokenizer.eos_token_id],
-                        prompt_id=prompt_id,
-                        collect_traces=args.collect_allocation_data,
-                    )
-                else:
-                    response[method_key] = dflash2_tree_generate(
-                        model=draft_model,
-                        target=target,
-                        input_ids=input_ids,
-                        max_new_tokens=args.max_new_tokens,
-                        stop_token_ids=[tokenizer.eos_token_id],
-                        tree_budget=method_key_to_tree_budget[method_key],
-                        tree_method=method_key_to_tree_method[method_key],
-                        prompt_id=prompt_id,
-                        collect_tree_data=args.collect_allocation_data,
-                    )
-                comparable_to_baseline = (
-                    not args.native_method_trajectories or turn_index == 0
-                )
-                if comparable_to_baseline and method_key.startswith("dflash2"):
-                    response[method_key].matches_baseline = torch.equal(
-                        response["baseline"].output_ids,
-                        response[method_key].output_ids,
-                    )
-                    if not response[method_key].matches_baseline:
-                        logger.warning(
-                            f"{method_key} output differs from the "
-                            "sequential baseline for dataset index "
-                            f"{idx}. Inspect early or large divergences; "
-                            "occasional BF16 tree-shape argmax differences "
-                            "are possible."
-                        )
+                method_inputs[method_key] = (input_ids, prompt_id, prompt_hash)
 
-                if args.native_method_trajectories:
+            # Repeat timing measurement from the same input context
+            # (`method_inputs` is built once above, per turn) for every
+            # configured repetition, rotating the measured method order
+            # deterministically so no method is always first or last.
+            method_repetition_results: dict[str, list] = {
+                method_key: [] for method_key in all_method_keys
+            }
+            for repetition_index in range(args.timing_repetitions):
+                execution_order = rotate_method_order(
+                    list(all_method_keys),
+                    dataset_index=idx,
+                    turn_index=turn_index,
+                    repetition_index=repetition_index,
+                )
+                for method_key in execution_order:
+                    input_ids, prompt_id, prompt_hash = method_inputs[method_key]
+                    result = measure_method_with_peak_memory(
+                        method_key,
+                        device=device,
+                        peak_memory_tracker=peak_memory_tracker,
+                        draft_model=draft_model,
+                        target=target,
+                        tokenizer=tokenizer,
+                        input_ids=input_ids,
+                        max_new_tokens=args.max_new_tokens,
+                        temperature=args.temperature,
+                        block_size=block_size,
+                        method_key_to_tree_budget=method_key_to_tree_budget,
+                        method_key_to_tree_method=method_key_to_tree_method,
+                        collect_allocation_data=args.collect_allocation_data,
+                        prompt_id=prompt_id,
+                    )
+                    result.repetition_index = repetition_index
+                    result.execution_order = execution_order
+                    result.prompt_id = prompt_id
+                    result.prompt_hash = prompt_hash
+                    method_repetition_results[method_key].append(result)
+
+            # Only the designated (first) repetition advances history;
+            # every repetition is compared against the corresponding
+            # baseline repetition and kept for paired timing comparisons.
+            response = attach_repetition_bookkeeping(method_repetition_results)
+
+            comparable_to_baseline = (
+                not args.native_method_trajectories or turn_index == 0
+            )
+            # Every measured method (original DFlash/DDTree as well as
+            # DFlash2 variants) is compared against the sequential baseline
+            # so Step 9's correctness.csv can report exact-output match
+            # rates for the whole method matrix, not just DFlash2. Only
+            # turn 0 is comparable in native-trajectory mode, since later
+            # turns intentionally diverge history.
+            apply_baseline_comparison(
+                response,
+                methods_to_run,
+                comparable_to_baseline=comparable_to_baseline,
+                dataset_index=idx,
+            )
+
+            if args.native_method_trajectories:
+                for method_key in all_method_keys:
                     result = response[method_key]
                     generated_ids = result.output_ids[
                         0,
@@ -591,12 +788,11 @@ def main() -> None:
                             ),
                         }
                     )
-
-            if not args.native_method_trajectories:
-                spec_response = response[methods_to_run[-1]]
-                generated_ids = spec_response.output_ids[
+            else:
+                baseline_response = response["baseline"]
+                generated_ids = baseline_response.output_ids[
                     0,
-                    spec_response.num_input_tokens :,
+                    baseline_response.num_input_tokens :,
                 ]
                 shared_messages.append(
                     {

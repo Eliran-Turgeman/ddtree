@@ -5,6 +5,7 @@ import torch
 from transformers import AutoModelForCausalLM
 
 from generation_cache import create_generation_cache, retain_cache_prefix
+from dflash import end_to_end_timing_fields
 from model import DFlash2DraftModel, extract_context_feature
 
 
@@ -310,7 +311,10 @@ def dflash2_generate(
                 .to(torch.int32)
             )
     num_output_tokens = output_ids.shape[1] - num_input_tokens
-    total_decode_time = cuda_time() - decode_start
+    timing_fields = end_to_end_timing_fields(
+        prefill_start, decode_start, num_output_tokens
+    )
+    total_decode_time = timing_fields["decode_time"]
 
     return SimpleNamespace(
         output_ids=output_ids.cpu(),
@@ -328,4 +332,5 @@ def dflash2_generate(
         round_timestamps=round_timestamps,
         round_metrics=round_metrics,
         trace_rounds=trace_rounds,
+        **timing_fields,
     )

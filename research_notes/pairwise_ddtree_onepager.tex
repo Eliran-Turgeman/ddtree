@@ -1,0 +1,203 @@
+\documentclass[9pt,landscape]{article}
+\usepackage[letterpaper,margin=0.42in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\definecolor{pairwise}{HTML}{B42318}
+\definecolor{unary}{HTML}{374151}
+\definecolor{ink}{HTML}{111827}
+\definecolor{muted}{HTML}{4B5563}
+\definecolor{panel}{HTML}{F3F4F6}
+\definecolor{blue}{HTML}{355F8A}
+
+\input{figures/onepager_frozen_values.tex}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{2.2pt}
+\setlist[itemize]{leftmargin=10pt,itemsep=1.2pt,topsep=1.5pt}
+\newcommand{\heading}[1]{%
+  \vspace{1pt}{\color{ink}\bfseries\large #1}\vspace{1pt}\par}
+\newcommand{\smallheading}[1]{%
+  {\color{ink}\bfseries #1}\hspace{2pt}}
+\newcommand{\pair}{\textcolor{pairwise}{Pairwise-K16}}
+\newcommand{\unaryname}{\textcolor{unary}{Unary-K16}}
+
+\begin{document}
+\color{ink}
+
+\begin{minipage}[t]{0.73\textwidth}
+  {\fontsize{20}{22}\selectfont\bfseries Conditional Draft Trees with DFlash2}\\[-1pt]
+  {\fontsize{10.5}{12}\selectfont\color{muted}
+  Using predecessor-conditioned scores to allocate speculative verification trees}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.25\textwidth}
+  \raggedleft\footnotesize
+  Research exploration\\
+  Frozen Qwen3-4B + official Qwen3.8-27B evidence
+\end{minipage}
+
+\vspace{2pt}\hrule\vspace{5pt}
+
+\begin{minipage}[t]{0.485\textwidth}
+\heading{Problem and idea}
+\colorbox{panel}{%
+  \parbox{\dimexpr\linewidth-2\fboxsep\relax}{%
+  \smallheading{Problem.}
+  DDTree allocates a fixed \(B\)-node verification tree using independent
+  positional marginals. The score of \emph{York} at depth 2 is unchanged
+  after \emph{New} or \emph{Los}.
+
+  \smallheading{Idea.}
+  DFlash2 already exposes predecessor-conditioned selector scores.
+  Convert them into bounded, mass-preserving transitions and reuse the same
+  DDTree best-first allocator and target verifier.}}
+
+\vspace{3pt}
+\begin{minipage}[t]{0.47\linewidth}
+  \centering
+  \textbf{\color{unary}Unary allocation}\\[-2pt]
+  \[
+    Q_U(y_{1:d})=\prod_{t=1}^{d}q_t(y_t)
+  \]
+  \scriptsize Independent positional marginals
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.51\linewidth}
+  \centering
+  \textbf{\color{pairwise}Conditional allocation}\\[-2pt]
+  \[
+    Q_P(y_{1:d}\!\mid y_0)
+    =\prod_{t=1}^{d}m_t\,r_t(y_t\!\mid y_{t-1})
+  \]
+  \scriptsize \(y_0\): verified anchor; \(m_t\): retained top-16 unary mass
+\end{minipage}
+
+\vspace{2pt}
+\begingroup\small
+\[
+\log m_t=\operatorname{LSE}_{b\in C_t}U_t(b)
+-\operatorname{LSE}_{v\in\mathcal V}U_t(v),
+\qquad
+r_t(b\mid a)=\operatorname{softmax}_{b\in C_t}
+\!\left[U_t(b)+c_t(a,b)\right].
+\]
+\endgroup
+\footnotesize
+\(m_t\) preserves how much full-vocabulary mass lies in \(C_t\);
+\(r_t\) redistributes it using DFlash2's learned selector.
+Every extension lies in \([0,1]\), so descendants cannot outrank parents and
+best-first construction remains prefix-closed.
+
+\heading{Why conditioning can spend \(B\) better}
+\begin{center}
+\begin{tabular}{@{}rcl@{\qquad}rcl@{}}
+\textbf{New} & \(\rightarrow\) &
+  \textcolor{pairwise}{\textbf{York}} & 
+\textbf{Los} & \(\rightarrow\) &
+  \textcolor{pairwise}{\textbf{Angeles}} \\
+ & \(\searrow\) & Jersey &
+ & \(\searrow\) & \textcolor{muted}{York}
+\end{tabular}
+\end{center}
+\vspace{-3pt}
+\scriptsize
+Unary knows that \emph{York} is individually likely. Conditional allocation
+can prefer coherent paths (\emph{New York}, \emph{Los Angeles}) over
+inconsistent combinations. The contribution changes \textbf{tree allocation},
+not target verification.
+
+\heading{Falsification test: candidate breadth}
+\vspace{-3pt}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/wider_unary_falsification.pdf}
+\end{center}
+\vspace{-8pt}
+\scriptsize
+\textbf{Qwen3-4B, Step 6.3.} Wider unary support improves target-path
+representability but barely changes fixed-\(B\) acceptance; \pair{} remains
+above Unary-K16/K32/K64. \(K\) is candidate support; \(B\) is verified nodes.
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.485\textwidth}
+\heading{Transfer across checkpoint and model scale}
+\vspace{-4pt}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/model_scale_transfer.pdf}
+\end{center}
+\vspace{-8pt}
+\scriptsize
+Points show \pair{} minus \unaryname{} mean matched draft tokens;
+bars are paired prompt-bootstrap 95\% CIs.
+
+\vspace{4pt}
+\begin{minipage}[t]{0.54\linewidth}
+\smallheading{Official Qwen3.8-27B DFlash2}
+\vspace{2pt}
+\centering
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Pairwise gain & \(B{=}16\) & \(B{=}32\) & \(B{=}64\) \\
+\midrule
+\StepSevenGainRows
+\bottomrule
+\end{tabular}
+
+\vspace{3pt}
+\raggedright
+\textbf{All paired 95\% CIs exclude zero.}\\
+\(\ExactMatchCount/\ExactMatchTotal\) Unary/Pairwise outputs exactly matched
+sequential target decoding.
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.42\linewidth}
+\smallheading{Cross-domain 4B evidence}
+\begin{itemize}
+  \item Same \(K=16\), same \(B\): Pairwise improves matched tokens on
+    GSM8K, MATH500, HumanEval, and MT-Bench.
+  \item The 4B prototype converts higher acceptance into positive throughput
+    gains at every tested budget/domain.
+\end{itemize}
+\end{minipage}
+
+\heading{What the evidence supports}
+\begin{itemize}
+  \item \textbf{Conditional allocation is consistently better under the
+    tested fixed-node budgets.}
+    Wider unary support to \(K=64\) does not recover the gain.
+  \item \textbf{The effect transfers} from an experimental Qwen3-4B DFlash2
+    checkpoint to the official Qwen3.8-27B DFlash2 pair.
+  \item \textbf{System claim is architecture-specific.}
+    The 27B correctness-first recurrent verifier cannot parallelize branches;
+    Pairwise and Unary throughput are statistically tied there.
+\end{itemize}
+
+\heading{Mathematical boundary}
+\footnotesize
+For the explicit conditional surrogate (augmented with residual mass outside
+top-16), DDTree's tail-sum objective remains additive and best-first returns
+the highest-mass \(B\) prefixes on the retained lattice.
+\textbf{We do not claim} optimality under the target distribution, unrestricted
+vocabulary optimality, or that arbitrary conditional scores improve ranking.
+
+\vfill
+\hrule\vspace{3pt}
+\scriptsize\color{muted}
+\textbf{Attribution.}
+DDTree: verification-tree objective, best-first construction, verifier.
+DFlash2: drafter, top-16 lattice, predecessor-conditioned selector.
+This extension: mass-preserving conditional scorer, integration, controlled
+falsification and transfer studies.\\
+\textbf{Frozen sources.}
+Step 6.2, Step 6.3, and Step 7 committed analysis tables; figures are generated
+directly from their CSV/JSON artifacts.
+\end{minipage}
+
+\end{document}

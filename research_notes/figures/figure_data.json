@@ -1,0 +1,300 @@
+{
+  "model_scale_transfer": [
+    {
+      "budget": 16,
+      "ci_high": 0.48368792922711046,
+      "ci_low": 0.383139685827374,
+      "dataset": "GSM8K",
+      "gain": 0.4327662756316911,
+      "model_scale": "4B"
+    },
+    {
+      "budget": 32,
+      "ci_high": 0.557527738623413,
+      "ci_low": 0.4608068802812648,
+      "dataset": "GSM8K",
+      "gain": 0.5086641540248145,
+      "model_scale": "4B"
+    },
+    {
+      "budget": 64,
+      "ci_high": 0.5907685805490426,
+      "ci_low": 0.49866377848696686,
+      "dataset": "GSM8K",
+      "gain": 0.5453225336268843,
+      "model_scale": "4B"
+    },
+    {
+      "budget": 16,
+      "ci_high": 0.4853981296114176,
+      "ci_low": 0.35333981537517684,
+      "dataset": "GSM8K",
+      "gain": 0.4179941620297972,
+      "model_scale": "27B"
+    },
+    {
+      "budget": 32,
+      "ci_high": 0.5053421409094343,
+      "ci_low": 0.38353954613406344,
+      "dataset": "GSM8K",
+      "gain": 0.443843804261338,
+      "model_scale": "27B"
+    },
+    {
+      "budget": 64,
+      "ci_high": 0.4992980756896658,
+      "ci_low": 0.3741413799616394,
+      "dataset": "GSM8K",
+      "gain": 0.4363610080227541,
+      "model_scale": "27B"
+    },
+    {
+      "budget": 16,
+      "ci_high": 0.5179266971846432,
+      "ci_low": 0.41172165223094725,
+      "dataset": "MATH500",
+      "gain": 0.4648226221670128,
+      "model_scale": "4B"
+    },
+    {
+      "budget": 32,
+      "ci_high": 0.6040588825428778,
+      "ci_low": 0.5088021273018085,
+      "dataset": "MATH500",
+      "gain": 0.554896014632544,
+      "model_scale": "4B"
+    },
+    {
+      "budget": 64,
+      "ci_high": 0.6070852946888503,
+      "ci_low": 0.5123791856533021,
+      "dataset": "MATH500",
+      "gain": 0.5598272601408791,
+      "model_scale": "4B"
+    },
+    {
+      "budget": 16,
+      "ci_high": 0.4613109373469985,
+      "ci_low": 0.3506984665047224,
+      "dataset": "MATH500",
+      "gain": 0.4035840780856051,
+      "model_scale": "27B"
+    },
+    {
+      "budget": 32,
+      "ci_high": 0.4947129921285624,
+      "ci_low": 0.3853766142738344,
+      "dataset": "MATH500",
+      "gain": 0.43867726755149805,
+      "model_scale": "27B"
+    },
+    {
+      "budget": 64,
+      "ci_high": 0.49126196672894834,
+      "ci_low": 0.3776367414198187,
+      "dataset": "MATH500",
+      "gain": 0.4336971438005677,
+      "model_scale": "27B"
+    }
+  ],
+  "sources": {
+    "analysis\\2026-09-05_step63-wide-unary\\method_metrics.csv": "37d49b227dcebcc49588553b64a8cab05b19f1896b7168bde9b44ced72711855",
+    "analysis\\2026-09-05_step63-wide-unary\\pairwise_comparisons.csv": "eff4bf9a9d4330b1c88d2e632d2fabc666ccded18d46880690e9dd9e41943e76",
+    "analysis\\2026-09-05_step7-27b\\pairwise_comparisons.csv": "9bcb37db03480f3e2279160bd169c1d80144c62d55c9625dfd41e90aa2ea28a5",
+    "analysis\\2026-09-05_step7-27b\\provenance.json": "6dc1290f68d1e9b585f15ff37b4b8a70ca774f9902b65b46b0108f389c72b47f"
+  },
+  "wider_unary_falsification": [
+    {
+      "budget": 8,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.083254421141035,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 16,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.472918018465831,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 32,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.739450303122912,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 64,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.9455961012394205,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 8,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.091263167518465,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 16,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.4692872246439705,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 32,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.7406148890776905,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 64,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.952109510959326,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 8,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.088983428192982,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 16,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.474630860573161,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 32,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.743206806572222,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 64,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.947865160841232,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 8,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.338625889495459,
+      "method": "Pairwise-K16"
+    },
+    {
+      "budget": 16,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 4.905684294097522,
+      "method": "Pairwise-K16"
+    },
+    {
+      "budget": 32,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 5.248114457147726,
+      "method": "Pairwise-K16"
+    },
+    {
+      "budget": 64,
+      "dataset": "GSM8K",
+      "mean_matched_draft_tokens": 5.490918634866305,
+      "method": "Pairwise-K16"
+    },
+    {
+      "budget": 8,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.328888357831451,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 16,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.731839672859206,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 32,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.975737019398218,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 64,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 5.190011101537239,
+      "method": "Unary-K16"
+    },
+    {
+      "budget": 8,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.313471707586155,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 16,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.729516364943144,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 32,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.969423023664661,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 64,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 5.1879752593138235,
+      "method": "Unary-K32"
+    },
+    {
+      "budget": 8,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.308454601235937,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 16,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.732297527976514,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 32,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.983601849703702,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 64,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 5.195969310216761,
+      "method": "Unary-K64"
+    },
+    {
+      "budget": 8,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 4.61578341654131,
+      "method": "Pairwise-K16"
+    },
+    {
+      "budget": 16,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 5.196662295026219,
+      "method": "Pairwise-K16"
+    },
+    {
+      "budget": 32,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 5.530633034030762,
+      "method": "Pairwise-K16"
+    },
+    {
+      "budget": 64,
+      "dataset": "MATH500",
+      "mean_matched_draft_tokens": 5.749838361678119,
+      "method": "Pairwise-K16"
+    }
+  ]
+}

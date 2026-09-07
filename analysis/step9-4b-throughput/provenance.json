@@ -1,0 +1,179 @@
+{
+  "allow_partial": false,
+  "artifacts": [
+    {
+      "dataset": "gsm8k",
+      "dataset_label": "GSM8K",
+      "dataset_revision": "740312add88f781978c0658806c59bc2815b9866",
+      "family": "original",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/gsm8k_original_controlled.pt",
+      "sample_count": 128,
+      "sha256": "b9bf19946331cc7a2ecc77d6307428c6d63516ecd631d89059900a3a615b727e",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "gsm8k",
+      "dataset_label": "GSM8K",
+      "dataset_revision": "740312add88f781978c0658806c59bc2815b9866",
+      "family": "dflash2",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/gsm8k_dflash2_controlled.pt",
+      "sample_count": 128,
+      "sha256": "bfdde1b1095d3bba301ce762e6c348328f76e836466acc3de0de1097ce0757c4",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "humaneval",
+      "dataset_label": "HumanEval",
+      "dataset_revision": "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
+      "family": "original",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/humaneval_original_controlled.pt",
+      "sample_count": 164,
+      "sha256": "167dc064d2c9890e0cdaca779cef4efad5ae2b8b8555dd949b4aa141a59e0ec2",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "humaneval",
+      "dataset_label": "HumanEval",
+      "dataset_revision": "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
+      "family": "dflash2",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/humaneval_dflash2_controlled.pt",
+      "sample_count": 164,
+      "sha256": "02aa89af18963941db62a4ae7b51980def9b82ee2a4f620774f738116d2fbc52",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "math500",
+      "dataset_label": "MATH500",
+      "dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+      "family": "original",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/math500_original_controlled.pt",
+      "sample_count": 128,
+      "sha256": "1927db022094df3f1756b134f424bdc6344e7b78240f887c7b11bba8cbea5261",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "math500",
+      "dataset_label": "MATH500",
+      "dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+      "family": "dflash2",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/math500_dflash2_controlled.pt",
+      "sample_count": 128,
+      "sha256": "12b54bf841753f31b08bf0600fabdaab66521178f4d3b98afe49ef55f65b33f1",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "mt-bench",
+      "dataset_label": "MT-Bench-controlled",
+      "dataset_revision": "e3a795c5e9a82ee40611c416b8a7786c73198991",
+      "family": "original",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/mt-bench_original_controlled.pt",
+      "sample_count": 80,
+      "sha256": "7f3e7a64bccdd4f4bd55b036fd6077718b2ef2573a712955924ce9325ebc1be9",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "mt-bench",
+      "dataset_label": "MT-Bench-controlled",
+      "dataset_revision": "e3a795c5e9a82ee40611c416b8a7786c73198991",
+      "family": "dflash2",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/mt-bench_dflash2_controlled.pt",
+      "sample_count": 80,
+      "sha256": "633a39a39fbbed1fa0632ee113f2d505a16831221b8c78195e98b32878a65e37",
+      "trajectory_mode": "controlled_shared"
+    },
+    {
+      "dataset": "mt-bench",
+      "dataset_label": "MT-Bench-native",
+      "dataset_revision": "e3a795c5e9a82ee40611c416b8a7786c73198991",
+      "family": "original",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/mt-bench_original_native.pt",
+      "sample_count": 80,
+      "sha256": "286671d0cccd8c67f216f2939c761471eaf54c8a7c11188a08eb076e16c9b61b",
+      "trajectory_mode": "native"
+    },
+    {
+      "dataset": "mt-bench",
+      "dataset_label": "MT-Bench-native",
+      "dataset_revision": "e3a795c5e9a82ee40611c416b8a7786c73198991",
+      "family": "dflash2",
+      "path": "artifacts/step9_4b/1bfb1cb8cf3cb40308d520de608a01fe5a86eafe/full/mt-bench_dflash2_native.pt",
+      "sample_count": 80,
+      "sha256": "05348191f193bfa8f9fc4cd2c3a5c1c17500468abe501678a2f9b6f21a53581e",
+      "trajectory_mode": "native"
+    }
+  ],
+  "bootstrap_samples": 10000,
+  "bootstrap_seed": 20260906,
+  "dflash2_draft_revision": "e3e7a18e4f541fa3841c2fb0666a7759079ab6fd",
+  "expected_commit": "1bfb1cb8cf3cb40308d520de608a01fe5a86eafe",
+  "generated_at": "2026-09-07T13:03:21.727381+00:00",
+  "original_draft_revision": "b74e3a329c4d963783143b1e970d95b002be72bd",
+  "target_model": "Qwen/Qwen3-4B",
+  "target_revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+  "timing_field_source_counts": {
+    "baseline": {
+      "derived": 0,
+      "runner": 1160
+    },
+    "ddtree_tb16": {
+      "derived": 0,
+      "runner": 580
+    },
+    "ddtree_tb32": {
+      "derived": 0,
+      "runner": 580
+    },
+    "ddtree_tb64": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_original_ddtree_tb16": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_original_ddtree_tb32": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_original_ddtree_tb64": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_original_ddtree_tb7": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_pairwise_k16_tb16": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_pairwise_k16_tb32": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_pairwise_k16_tb64": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_pairwise_k16_tb7": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_unary_k16_tb32": {
+      "derived": 0,
+      "runner": 580
+    },
+    "dflash2_unary_k16_tb64": {
+      "derived": 0,
+      "runner": 580
+    }
+  }
+}

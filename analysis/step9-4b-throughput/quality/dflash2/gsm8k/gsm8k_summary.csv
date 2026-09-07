@@ -1,0 +1,13 @@
+method_key,method,budget,evaluated,correct,accuracy
+baseline,target-only,,128,65,0.5078125
+dflash2,dflash2,,128,61,0.4765625
+dflash2_original_ddtree_tb7,dflash2-original-ddtree,7,128,62,0.484375
+dflash2_original_ddtree_tb16,dflash2-original-ddtree,16,128,64,0.5
+dflash2_original_ddtree_tb32,dflash2-original-ddtree,32,128,63,0.4921875
+dflash2_original_ddtree_tb64,dflash2-original-ddtree,64,128,62,0.484375
+dflash2_pairwise_k16_tb7,pairwise,7,128,64,0.5
+dflash2_pairwise_k16_tb16,pairwise,16,128,62,0.484375
+dflash2_pairwise_k16_tb32,pairwise,32,128,60,0.46875
+dflash2_pairwise_k16_tb64,pairwise,64,128,65,0.5078125
+dflash2_unary_k16_tb32,unary,32,128,62,0.484375
+dflash2_unary_k16_tb64,unary,64,128,62,0.484375

@@ -1,0 +1,284 @@
+\documentclass[10pt]{article}
+\usepackage[letterpaper,margin=0.62in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{longtable}
+\usepackage{pdflscape}
+\usepackage[table]{xcolor}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+
+\definecolor{pairwise}{HTML}{B42318}
+\definecolor{unary}{HTML}{374151}
+\definecolor{original}{HTML}{355F8A}
+\definecolor{ink}{HTML}{111827}
+\definecolor{muted}{HTML}{4B5563}
+\definecolor{panel}{HTML}{F3F4F6}
+
+\input{figures/step9_benchmark_values.tex}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\footnotesize Step 9: Qwen3-4B throughput validation}
+\rhead{\footnotesize Frozen benchmark report}
+\cfoot{\footnotesize\thepage}
+\setlength{\headheight}{14pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\setlist[itemize]{leftmargin=16pt,itemsep=2pt,topsep=2pt}
+\renewcommand{\arraystretch}{1.08}
+\newcommand{\pairwise}{\textcolor{pairwise}{Pairwise-K16}}
+\newcommand{\unaryname}{\textcolor{unary}{unary DDTree}}
+
+\begin{document}
+
+\begin{center}
+{\LARGE\bfseries Conditional Draft Trees with DFlash2}\\[3pt]
+{\large One-H100 Qwen3-4B throughput benchmark}\\[5pt]
+{\small Frozen protocol commit
+\texttt{1bfb1cb8cf3cb40308d520de608a01fe5a86eafe};
+results commit \texttt{84c839b3df84068a5ec010d8b64550f4dbf40457}}
+\end{center}
+
+\vspace{2pt}
+\colorbox{panel}{%
+\parbox{\dimexpr\linewidth-2\fboxsep\relax}{%
+\textbf{Result in one sentence.}
+Within the same DFlash2 system, predecessor-conditioned \pairwise{} allocation
+improves end-to-end throughput over released \unaryname{} by
+\StepNineMinGain--\StepNineMaxGain{} across every tested slice; however,
+released original DFlash and original DFlash+DDTree remain faster in absolute
+tokens/s.}}
+
+\section{Research question and experimental boundary}
+
+The controlled question is:
+\emph{Given the same DFlash2 checkpoint, top-16 candidate lattice, packed
+target verifier, prompt, and verification-node budget, does
+predecessor-conditioned tree allocation improve end-to-end output
+throughput over released unary DDTree allocation?}
+
+The practical system question is broader:
+\emph{Does DFlash2 with Pairwise-DDTree outperform raw released DFlash and
+released DFlash+DDTree in absolute tokens/s?}
+The first comparison isolates allocation. The second changes the drafter
+checkpoint, architecture, and draft attention backend, so it is descriptive
+rather than a causal allocator ablation.
+
+\begin{center}
+\StepNinePrimaryTable
+\end{center}
+
+All five primary paired prompt/conversation-bootstrap 95\% confidence
+intervals exclude zero. The gain is positive on 520 of 580 prompt clusters.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.84\linewidth]{figures/step9_primary_gain.pdf}
+\caption{Primary controlled comparison at \(B=16\). Error bars are paired
+prompt/conversation-bootstrap 95\% confidence intervals over end-to-end
+output tokens/s, including target prefill.}
+\label{fig:primary}
+\end{figure}
+
+\section{Frozen benchmark configuration}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+Component & Frozen value \\
+\midrule
+Target & \texttt{Qwen/Qwen3-4B} at revision \texttt{1cfa9a72...} \\
+Original drafter & \texttt{z-lab/Qwen3-4B-DFlash-b16} at revision \texttt{b74e3a32...} \\
+DFlash2 drafter & \texttt{mgoin/Qwen3-4B-speculator.dflash2} at revision \texttt{e3e7a18e...} \\
+Hardware & One NVIDIA H100 80GB HBM3 \\
+Software & Python 3.10.12; PyTorch 2.7.0; CUDA 12.8; Transformers 5.16.1 \\
+Precision / decoding & BF16; greedy; maximum 256 new tokens \\
+Attention & Target SDPA; original draft FlashAttention2; DFlash2 draft SDPA \\
+Timing & Three repetitions per method and prompt/turn; full method-order shuffle \\
+Primary endpoint & End-to-end output tokens/s, including prefill \\
+Uncertainty & 10,000 paired prompt/conversation bootstrap resamples; seed 20260906 \\
+\bottomrule
+\end{tabular}
+
+\vspace{5pt}
+Datasets use pinned revisions and deterministic seed-0 selection: 128 GSM8K,
+128 MATH500, all 164 HumanEval, and 80 two-turn MT-Bench conversations.
+MT-Bench is measured with both controlled sequential-baseline history and
+native per-method history. The full provenance, dataset revisions, runtime
+versions, artifact hashes, and timing-source counts are recorded in
+\texttt{analysis/step9-4b-throughput/provenance.json}.
+
+\clearpage
+\section{Absolute throughput: allocator win, not system win}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{figures/step9_system_throughput.pdf}
+\caption{Absolute end-to-end output throughput at \(B=16\). The original
+DFlash family is faster than the tested DFlash2 family. Within DFlash2,
+Pairwise consistently improves over unary DDTree.}
+\label{fig:absolute}
+\end{figure}
+
+At \(B=16\), \pairwise{} raises DFlash2 throughput from 163.32 to
+176.79 tok/s on GSM8K, 168.58 to 184.21 on MATH500, 145.77 to 156.44 on
+HumanEval, 129.57 to 136.64 on controlled MT-Bench, and 130.46 to 137.66 on
+native MT-Bench. The associated relative gains range from
+\StepNineMinGain{} to \StepNineMaxGain.
+
+The stronger practical baseline remains released original DFlash:
+raw original DFlash reaches 152.98--268.28 tok/s, while original
+DFlash+DDTree-B16 reaches 177.95--285.39 tok/s across the same slices.
+Every Pairwise-B16 cross-drafter confidence interval remains below zero,
+including after normalizing each family by its own sequential-target process.
+
+\textbf{Interpretation.}
+The experiment answers the narrow scientific question positively:
+conditioning allocates the DFlash2 tree more efficiently and converts that
+acceptance gain into throughput. It answers the product-level question
+negatively for these checkpoints: the tested Pairwise-DFlash2 system is not
+the fastest end-to-end system.
+
+\section{Behavior across verification budgets}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{figures/step9_budget_throughput.pdf}
+\caption{End-to-end throughput across verification budgets. Fixed Unary-K16
+is shown at \(B=32,64\) to separate candidate breadth from allocation.}
+\label{fig:budget-throughput}
+\end{figure}
+
+\pairwise{} exceeds released DFlash2 unary DDTree at every tested
+\(B\in\{7,16,32,64\}\) and on every dataset. At \(B=32,64\), released unary
+DDTree receives candidate width \(K=\min(B,|V|)\), while Pairwise remains on
+the native top-16 selector lattice. Its advantage therefore does not come
+from wider support.
+
+\clearpage
+\section{Mechanism: acceptance and target-call efficiency}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\linewidth]{figures/step9_budget_acceptance.pdf}
+\caption{Mean matched draft tokens per verification round. Pairwise
+conditioning consistently produces more useful speculative paths under the
+same node budget.}
+\label{fig:acceptance}
+\end{figure}
+
+At primary \(B=16\), mean matched draft tokens per round increase:
+\begin{itemize}
+\item GSM8K: 4.347 \(\rightarrow\) 4.823;
+\item MATH500: 4.375 \(\rightarrow\) 4.904;
+\item HumanEval: 3.819 \(\rightarrow\) 4.197;
+\item controlled MT-Bench: 3.116 \(\rightarrow\) 3.360;
+\item native MT-Bench: 3.109 \(\rightarrow\) 3.360.
+\end{itemize}
+
+More matched and committed draft tokens reduce target calls. Pairwise does
+add conditional tree-construction work, but the complete timing decomposition
+in Appendix~\ref{tab:all-timing} shows that the saved target work dominates
+under the packed Qwen3-4B verifier.
+
+\clearpage
+\section{Correctness and task quality}
+
+\begin{figure}[ht]
+\centering
+\begin{minipage}[t]{0.49\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/step9_exact_output.pdf}
+\caption{Full-output exact match against one-token sequential BF16 decoding.}
+\label{fig:exact}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/step9_task_quality.pdf}
+\caption{Direct task quality at \(B=16\). Differences are descriptive.}
+\label{fig:quality}
+\end{minipage}
+\end{figure}
+
+BF16 packed/block verification is not token-exact with one-token sequential
+target decoding on every prompt. At \(B=16\), Pairwise exact-output rates are
+57.0\% on GSM8K, 35.2\% on MATH500, 45.1\% on HumanEval, 36.3\% on controlled
+MT-Bench, and 37.5\% on native MT-Bench. Many outputs hit the 256-token cap,
+but the result still does not establish strict lossless equivalence.
+
+Direct task scores do not show a consistent Pairwise-B16 regression:
+GSM8K is 62/128 for Pairwise versus 64/128 for unary, MATH500 is 18/128
+for both, and HumanEval is 89/164 versus 88/164. These are not powered
+equivalence tests. MT-Bench responses were exported but not externally
+judged, so no MT-Bench quality score is claimed.
+
+\clearpage
+\section{Conclusions and limitations}
+
+\textbf{Supported conclusions}
+\begin{itemize}
+\item Under the tested one-H100 Qwen3-4B setup, predecessor-conditioned
+Pairwise allocation improves both matched draft tokens and end-to-end
+throughput over released unary DDTree allocation on the same DFlash2
+checkpoint.
+\item The controlled effect holds across math, code, and dialogue tasks,
+both MT-Bench trajectory regimes, and every tested node budget.
+\item Wider unary support does not explain the gain: Pairwise-K16 remains
+ahead when released unary DDTree receives \(K=32\) or \(K=64\).
+\end{itemize}
+
+\textbf{Important boundaries}
+\begin{itemize}
+\item Released original DFlash and original DFlash+DDTree are still faster
+in absolute tokens/s. Pairwise improves DFlash2; it does not win the complete
+cross-drafter system comparison.
+\item Cross-drafter rows conflate model architecture, checkpoint quality,
+implementation, and FlashAttention2-versus-SDPA draft attention.
+\item BF16 numerical trajectories are not universally exact, and the task
+sample sizes do not prove quality equivalence.
+\item Peak reserved memory includes allocator caching; peak allocated memory
+is the more meaningful method-level footprint.
+\item This is one GPU type, one target checkpoint, one maximum output length,
+and greedy decoding. Generalization beyond this setup requires measurement.
+\end{itemize}
+
+\section{Reproduction and provenance}
+
+Figures and appendix tables are regenerated only from frozen local analysis:
+\begin{verbatim}
+python research_notes/figures/generate_step9_benchmark_report.py
+cd research_notes
+pdflatex -interaction=nonstopmode -halt-on-error \
+  -output-directory=build_step9_report step9_4b_benchmark_report.tex
+pdflatex -interaction=nonstopmode -halt-on-error \
+  -output-directory=build_step9_report step9_4b_benchmark_report.tex
+\end{verbatim}
+
+The PDF is generated from CSV/JSON analysis, not manually transcribed chart
+values. Raw benchmark artifacts are retained locally under
+\texttt{artifacts/step9\_4b/1bfb1.../}; compact evidence and hashes are
+committed under \texttt{analysis/step9-4b-throughput/}. All 138 remote
+benchmark, analysis, quality, and log files were copied locally and verified
+against remote SHA-256 hashes before the H100 was released.
+
+\appendix
+\clearpage
+\section{Complete frozen result tables}
+
+The following tables reproduce every row in the frozen method metrics,
+paired-comparison, timing-decomposition, correctness, and directly scored
+quality outputs. NaN/not-applicable values are rendered as dashes.
+
+\begin{landscape}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\input{figures/step9_benchmark_tables.tex}
+\end{landscape}
+
+\end{document}
